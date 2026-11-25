@@ -1,1650 +1,1300 @@
 import Mathlib
 import PEqualNP.Defs
 
-namespace PEqualNP.Outside.L_meta_3376
-open PEqualNP.CircuitLowerBounds PEqualNP.MetaComplexity.NestedCover
+/-!
+**L-meta-3376 — on a plane of order `q`, an AND/OR circuit right on the incident pairs and on the
+false inputs of at most three elements has at least `3N - 1` gates**
 
-def wf (gs : List Gate) (w : List Bool) : List Bool :=
+The recorded statement (byte-exact, from `data/desk/gaps.json`) is the last theorem of this file.
+
+**The idea.** The merged row `L-meta-614` (`n + t ≤ size + 1`; ported in `L_meta_1483.lean`)
+reads the circuit only on point sets of at most THREE inputs: singletons, pairs, and a pair with
+one vertex added (`covers_edge`). So it holds for circuits that are right on that slice only,
+which is exactly what the statement assumes. Here `n = N + N` (points first, then lines) and
+`t = N`, the vertex-cover number of the incidence graph: the `N` points cover it, and a cover by
+`a` points and `b` lines has `a + b ≥ N` by counting the incidences of the points it misses (each
+lies on at least `q + 1` lines, each line has `q + 1` points). So `3N ≤ size + 1`.
+
+**What is in this file**
+
+* Part 1: the `L-meta-614` machinery of `L_meta_1483.lean`, copied in full, with `GraphEval`
+  weakened to sets of at most three inputs (`edge_of_point` takes the size bound; nothing else
+  changes).
+* Part 2: the incidence graph of a projective plane and the five hypotheses of `step614`: no
+  isolated vertex, twins distinguished, a two-vertex certificate on every incident pair, the
+  point cover and the cover bound; and the passage from the statement's inputs
+  (`incidenceInput`, `IsFalseInput`) to the slice.
+* Part 3: the recorded statement.
+
+Nothing is brought in beyond `Mathlib` and `PEqualNP.Defs`; every declaration lives in a scope of
+this file, and no proof leaves a gap or bypasses the kernel.
+-/
+
+/-! ## Part 1 — the `L-meta-614` machinery, ported inline
+-/
+
+
+namespace PEqualNP.Outside.L_meta_3376
+
+open PEqualNP.CircuitLowerBounds PEqualNP.MetaComplexity
+open Relation
+
+def wiresFrom (gs : List Gate) (w : List Bool) : List Bool :=
   gs.foldl (fun w g => w ++ [g.op.eval (g.inputs.map fun i => w.getD i false)]) w
 
-theorem wf_snoc (gs : List Gate) (g : Gate) (w : List Bool) :
-    wf (gs ++ [g]) w = wf gs w ++ [g.op.eval (g.inputs.map fun i => (wf gs w).getD i false)] := by
-  simp [wf, List.foldl_append]
+theorem wiresFrom_append (gs rest : List Gate) (w : List Bool) :
+    wiresFrom (gs ++ rest) w = wiresFrom rest (wiresFrom gs w) := by
+  simp [wiresFrom, List.foldl_append]
 
-theorem wf_len (gs : List Gate) : ∀ w : List Bool, (wf gs w).length = w.length + gs.length := by
+theorem wiresFrom_prefix (gs : List Gate) : ∀ w : List Bool,
+    ∃ t : List Bool, wiresFrom gs w = w ++ t ∧ t.length = gs.length := by
   induction gs with
-  | nil => intro w; simp [wf]
+  | nil => intro w; exact ⟨[], by simp [wiresFrom], rfl⟩
   | cons g gs ih =>
     intro w
-    have := ih (w ++ [g.op.eval (g.inputs.map fun i => w.getD i false)])
-    simp only [wf, List.foldl_cons] at this ⊢
-    rw [this]; simp; omega
+    obtain ⟨t, ht, hl⟩ := ih (w ++ [g.op.eval (g.inputs.map fun i => w.getD i false)])
+    refine ⟨g.op.eval (g.inputs.map fun i => w.getD i false) :: t, ?_, by simp [hl]⟩
+    change wiresFrom gs (w ++ [g.op.eval (g.inputs.map fun i => w.getD i false)]) = _
+    rw [ht]; simp
 
-theorem wf_keep (gs : List Gate) : ∀ (w : List Bool) (i : ℕ), i < w.length →
-    (wf gs w).getD i false = w.getD i false := by
-  induction gs with
-  | nil => intro w i _; rfl
-  | cons g gs ih =>
-    intro w i hi
-    have := ih (w ++ [g.op.eval (g.inputs.map fun i => w.getD i false)]) i (by simp; omega)
-    simp only [wf, List.foldl_cons] at this ⊢
-    rw [this]
-    simp [List.getD_eq_getElem?_getD, List.getElem?_append_left hi]
+theorem wiresFrom_length (gs : List Gate) (w : List Bool) :
+    (wiresFrom gs w).length = w.length + gs.length := by
+  obtain ⟨t, ht, hl⟩ := wiresFrom_prefix gs w
+  rw [ht]; simp [hl]
 
-theorem wf_prefix (pre post : List Gate) (w : List Bool) (i : ℕ)
-    (hi : i < w.length + pre.length) :
-    (wf (pre ++ post) w).getD i false = (wf pre w).getD i false := by
-  have : wf (pre ++ post) w = wf post (wf pre w) := by simp [wf, List.foldl_append]
-  rw [this]
-  exact wf_keep post _ i (by rw [wf_len]; exact hi)
+theorem prefix_val (gs : List Gate) (w : List Bool) (i : ℕ) (h : i < w.length) :
+    (wiresFrom gs w).getD i false = w.getD i false := by
+  obtain ⟨t, ht, _⟩ := wiresFrom_prefix gs w
+  rw [ht, List.getD_append _ _ _ _ h]
 
-theorem getD_snoc_eq (L : List Bool) (a : Bool) : (L ++ [a]).getD L.length false = a := by
-  simp [List.getD_eq_getElem?_getD]
+def val {n : ℕ} (C : Circuit) (x : Fin n → Bool) (i : ℕ) : Bool :=
+  (wiresFrom C.gates (List.ofFn x)).getD i false
 
-theorem wire_take (gates : List Gate) (X : List Bool) (k i : ℕ) (hi : i < X.length + k)
-    (hk : k ≤ gates.length) :
-    (wf gates X).getD i false = (wf (gates.take k) X).getD i false := by
-  conv_lhs => rw [← List.take_append_drop k gates]
-  exact wf_prefix _ _ _ _ (by rw [List.length_take, Nat.min_eq_left hk]; exact hi)
+theorem val_input {n : ℕ} (C : Circuit) (x : Fin n → Bool) (i : Fin n) :
+    val C x i.val = x i := by
+  rw [val, prefix_val _ _ _ (by simp), List.getD_eq_getElem _ _ (by simp)]
+  simp
 
-theorem gate_val (gates : List Gate) (X : List Bool) (k : ℕ) (hk : k < gates.length) :
-    (wf gates X).getD (X.length + k) false
-      = gates[k].op.eval (gates[k].inputs.map fun i => (wf (gates.take k) X).getD i false) := by
-  rw [wire_take gates X (k + 1) _ (by omega) hk, List.take_succ_eq_append_getElem hk, wf_snoc]
-  have := getD_snoc_eq (wf (gates.take k) X)
-    (gates[k].op.eval (gates[k].inputs.map fun i => (wf (gates.take k) X).getD i false))
-  rw [wf_len, List.length_take, Nat.min_eq_left (Nat.le_of_lt hk)] at this
-  exact this
+theorem val_beyond {n : ℕ} (C : Circuit) (x : Fin n → Bool) {i : ℕ}
+    (hi : n + C.gates.length ≤ i) : val C x i = false := by
+  rw [val, List.getD_eq_default _ _ (by simpa [wiresFrom_length] using hi)]
 
-def val (C : Circuit) (x : List Bool) (w : ℕ) : Bool := (C.wires x).getD w false
+def operand {n : ℕ} (C : Circuit) (x : Fin n → Bool) (j i : ℕ) : Bool :=
+  if i < j then val C x i else false
 
-theorem val_input (C : Circuit) (x : List Bool) (i : ℕ) (hi : i < x.length) :
-    val C x i = x.getD i false := wf_keep C.gates x i hi
+theorem val_gate {n : ℕ} (C : Circuit) (x : Fin n → Bool) {p : ℕ} {g : Gate}
+    (hp : C.gates[p]? = some g) :
+    val C x (n+p) = g.op.eval (g.inputs.map (operand C x (n+p))) := by
+  obtain ⟨hb, heq⟩ := List.getElem?_eq_some_iff.1 hp
+  have hsplit : C.gates = (C.gates.take p ++ [g]) ++ C.gates.drop (p+1) := by
+    conv_lhs => rw [← List.take_append_drop (p+1) C.gates]
+    rw [List.take_succ_eq_append_getElem hb, heq]
+  let w := wiresFrom (C.gates.take p) (List.ofFn x)
+  have hw : w.length = n+p := by
+    simp [w, wiresFrom_length, List.length_take, Nat.min_eq_left hb.le]
+  have hread (i : ℕ) : w.getD i false = operand C x (n+p) i := by
+    by_cases hi : i < n+p
+    · have hv : val C x i = w.getD i false := by
+        unfold val
+        conv_lhs => rw [hsplit, List.append_assoc, wiresFrom_append]
+        exact prefix_val _ w i (hw.symm ▸ hi)
+      simp only [operand, ite_eq_left hi, hv]
+    · rw [operand, ite_eq_right hi, List.getD_eq_default _ _ (by omega)]
+  have he : (g.inputs.map fun i => w.getD i false) = g.inputs.map (operand C x (n+p)) :=
+    List.map_congr_left fun i _ => hread i
+  unfold val
+  conv_lhs => rw [hsplit, List.append_assoc, wiresFrom_append]
+  change (wiresFrom (C.gates.drop (p+1))
+    (w ++ [g.op.eval (g.inputs.map fun i => w.getD i false)])).getD (n+p) false = _
+  rw [prefix_val _ _ _ (by simp [hw]), ← hw, he]
+  simp [hw]
 
-theorem val_gate (m : ℕ) (C : Circuit) (hrb : ReadsBack m C) (x : List Bool) (hx : x.length = m)
-    (k : ℕ) (hk : k < C.gates.length) :
-    val C x (m + k) = (gateAt C k).op.eval ((gateAt C k).inputs.map fun i => val C x i) := by
-  have hG : gateAt C k = C.gates[k] := by
-    unfold gateAt
-    rw [List.getD_eq_getElem _ _ hk]
-  have g1 := gate_val C.gates x k hk
-  rw [hx] at g1
-  show (wf C.gates x).getD (m + k) false = _
-  rw [g1, hG]
-  congr 1
-  apply List.map_congr_left
-  intro i hi
-  have hlt : i < m + k := by
-    have := hrb k hk i
-    rw [hG] at this
-    exact this hi
-  show _ = (wf C.gates x).getD i false
-  rw [wire_take C.gates x k i (by rw [hx]; exact hlt) (le_of_lt hk)]
+def Next (n : ℕ) (C : Circuit) (a b : ℕ) : Prop :=
+  a < b ∧ ∃ p g, C.gates[p]? = some g ∧ b = n+p ∧ a ∈ g.inputs
 
-def RdBy (m : ℕ) (C : Circuit) (w w' : ℕ) : Prop :=
-  ∃ k < C.gates.length, w' = m + k ∧ w ∈ (gateAt C k).inputs
+def Live (n : ℕ) (C : Circuit) (i : ℕ) : Prop :=
+  ReflTransGen (Next n C) i C.output
 
-open Classical in
-noncomputable def cone (m : ℕ) (C : Circuit) : Finset ℕ :=
-  (Finset.range C.gates.length).filter
-    (fun k => Relation.ReflTransGen (RdBy m C) (m + k) C.output)
+def LNext (n : ℕ) (C : Circuit) (a b : ℕ) : Prop := Next n C a b ∧ Live n C b
 
-theorem mem_cone (m : ℕ) (C : Circuit) (k : ℕ) :
-    k ∈ cone m C ↔ k < C.gates.length ∧ Relation.ReflTransGen (RdBy m C) (m + k) C.output := by
-  classical
-  unfold cone
-  simp only [Finset.mem_filter, Finset.mem_range]
+def Trace (n : ℕ) (C : Circuit) (P : ℕ → Prop) (i j : ℕ) : Prop :=
+  ReflTransGen (fun a b => P a ∧ LNext n C a b) i j
 
-theorem rd_lt (m : ℕ) (C : Circuit) (hrb : ReadsBack m C) (w w' : ℕ) (h : RdBy m C w w') :
-    w < w' := by
-  obtain ⟨k, hk, rfl, hw⟩ := h
-  exact hrb k hk w hw
-
-theorem rtg_le (m : ℕ) (C : Circuit) (hrb : ReadsBack m C) (w w' : ℕ)
-    (h : Relation.ReflTransGen (RdBy m C) w w') : w ≤ w' := by
+theorem next_le {n : ℕ} {C : Circuit} {a b : ℕ} (h : ReflTransGen (Next n C) a b) :
+    a ≤ b := by
   induction h with
-  | refl => exact le_refl _
-  | tail _ hbc ih => exact le_trans ih (le_of_lt (rd_lt m C hrb _ _ hbc))
+  | refl => exact le_rfl
+  | tail _ h ih => exact ih.trans h.1.le
 
-theorem cone_le_out (m : ℕ) (C : Circuit) (hrb : ReadsBack m C) (k : ℕ) (hk : k ∈ cone m C) :
-    m + k ≤ C.output :=
-  rtg_le m C hrb _ _ ((mem_cone m C k).mp hk).2
+theorem trace_le {n : ℕ} {C : Circuit} {P : ℕ → Prop} {a b : ℕ}
+    (h : Trace n C P a b) : a ≤ b := by
+  induction h with
+  | refl => exact le_rfl
+  | tail _ h ih => exact ih.trans h.2.1.1.le
 
-theorem cone_closed (m : ℕ) (C : Circuit) (hrb : ReadsBack m C) (k : ℕ) (hk : k ∈ cone m C)
-    (w : ℕ) (hw : w ∈ (gateAt C k).inputs) (hmw : m ≤ w) : w - m ∈ cone m C := by
-  obtain ⟨hkl, hr⟩ := (mem_cone m C k).mp hk
-  have hlt : w < m + k := hrb k hkl w hw
-  refine (mem_cone m C _).mpr ⟨by omega, ?_⟩
-  have e : m + (w - m) = w := by omega
-  rw [e]
-  exact Relation.ReflTransGen.head ⟨k, hkl, rfl, hw⟩ hr
+theorem live_before {n : ℕ} {C : Circuit} {a b : ℕ} (hn : Next n C a b) (h : Live n C b) :
+    Live n C a := (ReflTransGen.single hn).trans h
 
-theorem cone_read (m : ℕ) (C : Circuit) (j : ℕ) (hj : j ∈ cone m C) (hne : m + j ≠ C.output) :
-    ∃ k ∈ cone m C, m + j ∈ (gateAt C k).inputs := by
-  obtain ⟨_, hr⟩ := (mem_cone m C j).mp hj
-  rcases Relation.ReflTransGen.cases_head hr with h | ⟨c, ⟨k, hk, rfl, hw⟩, hc⟩
-  · exact absurd h hne
-  · exact ⟨k, (mem_cone m C k).mpr ⟨hk, hc⟩, hw⟩
+theorem trace_start {n : ℕ} {C : Circuit} {P : ℕ → Prop} {a b : ℕ}
+    (h : Trace n C P a b) (hb : P b) : P a := by
+  rcases h.cases_head with rfl | ⟨_, hs, _⟩
+  · exact hb
+  · exact hs.1
 
-theorem out_mem (m : ℕ) (C : Circuit) (h1 : m ≤ C.output) (h2 : C.output < m + C.gates.length) :
-    C.output - m ∈ cone m C := by
-  refine (mem_cone m C _).mpr ⟨by omega, ?_⟩
-  have e : m + (C.output - m) = C.output := by omega
-  rw [e]
+theorem align {n : ℕ} {C : Circuit} {P Q : ℕ → Prop} {v b : ℕ}
+    (p : Trace n C P v b)
+    (unique : ∀ a j j', a < b → P a → LNext n C a j → LNext n C a j' → j = j') :
+    ∀ d, Trace n C Q v d → (d < b ∧ P d) ∨ Trace n C Q b d := by
+  induction p using ReflTransGen.head_induction_on with
+  | refl =>
+    intro d q
+    exact Or.inr q
+  | head hp pt ih =>
+    intro d q
+    have hlt := hp.2.1.1.trans_le (trace_le pt)
+    rcases q.cases_head with rfl | ⟨j, hq, qt⟩
+    · exact Or.inl ⟨hlt, hp.1⟩
+    · have e := unique _ _ _ hlt hp.1 hp.2 hq.2
+      subst j
+      exact ih _ qt
 
-theorem sum_len (m : ℕ) (C : Circuit) (hrb : ReadsBack m C) (G : Finset ℕ)
-    (hG : ∀ k ∈ G, k < C.gates.length) :
-    ∑ k ∈ G, (gateAt C k).inputs.length =
-      ∑ w ∈ Finset.range (m + C.gates.length), readsIn C G w := by
-  unfold readsIn
-  rw [Finset.sum_comm]
-  apply Finset.sum_congr rfl
-  intro k hk
-  have hall : ∀ a ∈ ((gateAt C k).inputs : Multiset ℕ), a ∈ Finset.range (m + C.gates.length) := by
-    intro a ha
-    have ha' : a ∈ (gateAt C k).inputs := by simpa using ha
-    have := hrb k (hG k hk) a ha'
-    have := hG k hk
-    rw [Finset.mem_range]; omega
-  have := Multiset.sum_count_eq_card hall
-  simp only [Multiset.coe_count, Multiset.coe_card] at this
-  exact this.symm
-
-theorem reads_out (m : ℕ) (C : Circuit) (hrb : ReadsBack m C) (j : ℕ) (hj : j ∈ cone m C)
-    (hjo : m + j = C.output) : readsIn C (cone m C) (m + j) = 0 := by
-  unfold readsIn
-  apply Finset.sum_eq_zero
-  intro k hk
-  rw [List.count_eq_zero]
-  intro hmem
-  have h1 := cone_le_out m C hrb k hk
-  have h2 := hrb k ((mem_cone m C k).mp hk).1 _ hmem
-  omega
-
-theorem reads_off (m : ℕ) (C : Circuit) (hrb : ReadsBack m C) (j : ℕ) (hj : j ∉ cone m C) :
-    readsIn C (cone m C) (m + j) = 0 := by
-  unfold readsIn
-  apply Finset.sum_eq_zero
-  intro k hk
-  rw [List.count_eq_zero]
-  intro hmem
-  have := cone_closed m C hrb k hk (m + j) hmem (by omega)
-  rw [show m + j - m = j by omega] at this
-  exact hj this
-
-theorem reads_pos (m : ℕ) (C : Circuit) (j : ℕ) (hj : j ∈ cone m C) (hne : m + j ≠ C.output) :
-    1 ≤ readsIn C (cone m C) (m + j) := by
-  obtain ⟨k, hk, hmem⟩ := cone_read m C j hj hne
-  unfold readsIn
-  calc 1 ≤ (gateAt C k).inputs.count (m + j) := List.count_pos_iff.mpr hmem
-    _ ≤ _ := Finset.single_le_sum (f := fun k => (gateAt C k).inputs.count (m + j))
-        (fun _ _ => Nat.zero_le _) hk
-
-theorem cone_identity (m : ℕ) (C : Circuit) (hC : PEqualNP.TopForm.IsAO2 m C)
-    (h1 : m ≤ C.output) (h2 : C.output < m + C.gates.length) :
-    (cone m C).card + 1 = ∑ w ∈ Finset.range m, readsIn C (cone m C) w +
-      ∑ j ∈ cone m C, (readsIn C (cone m C) (m + j) - 1) := by
-  obtain ⟨_, hrb, hlen⟩ := hC
-  set K := cone m C with hK
-  have hKb : ∀ k ∈ K, k < C.gates.length := fun k hk => ((mem_cone m C k).mp hk).1
-  have hs := sum_len m C hrb K hKb
-  have h2k : ∑ k ∈ K, (gateAt C k).inputs.length = 2 * K.card := by
-    rw [Finset.card_eq_sum_ones, Finset.mul_sum]
-    apply Finset.sum_congr rfl
-    intro k hk
-    have hk' := hKb k hk
-    have : gateAt C k = C.gates[k] := by
-      unfold gateAt; rw [List.getD_eq_getElem _ _ hk']
-    rw [this, hlen _ (List.getElem_mem hk')]
-    norm_num
-  rw [Finset.range_add, Finset.sum_union (by
-    rw [Finset.disjoint_left]; intro a ha hb
-    simp only [Finset.mem_range, Finset.mem_map, addLeftEmbedding_apply] at ha hb
-    obtain ⟨b, _, rfl⟩ := hb; omega), Finset.sum_map] at hs
-  simp only [addLeftEmbedding_apply] at hs
-  have hsplit : ∑ j ∈ Finset.range C.gates.length, readsIn C K (m + j) =
-      ∑ j ∈ K, readsIn C K (m + j) := by
-    symm
-    apply Finset.sum_subset
-    · intro k hk; exact Finset.mem_range.mpr (hKb k hk)
-    · intro j _ hj; exact reads_off m C hrb j hj
-  rw [hsplit] at hs
-  set o := C.output - m with ho
-  have hoK : o ∈ K := out_mem m C h1 h2
-  have hfix : ∑ j ∈ K, readsIn C K (m + j) + 1 =
-      ∑ j ∈ K, (readsIn C K (m + j) - 1) + K.card := by
-    rw [← Finset.add_sum_erase K _ hoK, ← Finset.add_sum_erase K _ hoK]
-    have hro : readsIn C K (m + o) = 0 := reads_out m C hrb o hoK (by omega)
-    rw [hro]
-    have hrest : ∑ j ∈ K.erase o, readsIn C K (m + j) =
-        ∑ j ∈ K.erase o, (readsIn C K (m + j) - 1) + (K.erase o).card := by
-      rw [Finset.card_eq_sum_ones, ← Finset.sum_add_distrib]
-      apply Finset.sum_congr rfl
-      intro j hj
-      have := reads_pos m C j (Finset.mem_of_mem_erase hj) (by
-        intro e; apply Finset.ne_of_mem_erase hj; omega)
-      rw [← hK] at this
-      omega
-    rw [hrest, Finset.card_erase_of_mem hoK]
-    have : 1 ≤ K.card := Finset.card_pos.mpr ⟨o, hoK⟩
-    omega
-  omega
-
-theorem agree (m : ℕ) (C : Circuit) (hrb : ReadsBack m C) (x x' : List Bool)
-    (hx : x.length = m) (hx' : x'.length = m) (T : Finset ℕ) (A : ℕ → Prop)
-    (hin : ∀ i < m, A i → x.getD i false = x'.getD i false)
-    (hstep : ∀ k ∈ cone m C, k ∉ T → A (m + k) → ∀ w ∈ (gateAt C k).inputs, A w)
-    (hT : ∀ k ∈ cone m C, k ∈ T → val C x (m + k) = val C x' (m + k)) :
-    ∀ k ∈ cone m C, A (m + k) → val C x (m + k) = val C x' (m + k) := by
-  have main : ∀ w, ∀ k, w = m + k → k ∈ cone m C → A (m + k) →
-      val C x (m + k) = val C x' (m + k) := by
-    intro w
-    induction w using Nat.strong_induction_on with
-    | _ w ih =>
-    intro k hw hk hA
-    by_cases hkT : k ∈ T
-    · exact hT k hk hkT
-    have hkl : k < C.gates.length := ((mem_cone m C k).mp hk).1
-    rw [val_gate m C hrb x hx k hkl, val_gate m C hrb x' hx' k hkl]
-    congr 1
-    apply List.map_congr_left
-    intro i hi
-    have hAi := hstep k hk hkT hA i hi
-    have hlt : i < m + k := hrb k hkl i hi
-    by_cases him : i < m
-    · rw [val_input C x i (by omega), val_input C x' i (by omega)]
-      exact hin i him hAi
-    · have hc := cone_closed m C hrb k hk i hi (by omega)
-      have e : m + (i - m) = i := by omega
-      have := ih i (by omega) (i - m) e.symm hc (by rw [e]; exact hAi)
-      rw [e] at this
-      exact this
-  intro k hk hA
-  exact main (m + k) k rfl hk hA
-
-theorem eval_val (C : Circuit) (x : List Bool) : C.eval x = val C x C.output := rfl
-
-theorem dep (m : ℕ) (C : Circuit) (hrb : ReadsBack m C) (h1 : m ≤ C.output)
-    (h2 : C.output < m + C.gates.length) (i : ℕ) (hi : i < m)
-    (h0 : readsIn C (cone m C) i = 0) (x x' : List Bool) (hx : x.length = m)
-    (hx' : x'.length = m) (hagr : ∀ j < m, j ≠ i → x.getD j false = x'.getD j false) :
-    C.eval x = C.eval x' := by
-  have hno : ∀ k ∈ cone m C, i ∉ (gateAt C k).inputs := by
-    intro k hk hmem
-    unfold readsIn at h0
-    have := (Finset.sum_eq_zero_iff.mp h0) k hk
-    rw [List.count_eq_zero] at this
-    exact this hmem
-  have hoK := out_mem m C h1 h2
-  have e : m + (C.output - m) = C.output := by omega
-  have := agree m C hrb x x' hx hx' ∅ (fun w => w ≠ i) (fun j hj hA => hagr j hj hA)
-    (fun k hk _ _ w hw => fun e => hno k hk (e ▸ hw)) (fun k _ hT => absurd hT (by simp))
-    (C.output - m) hoK (by rw [e]; omega)
-  rw [e] at this
-  exact this
-
-theorem inc_len (N : ℕ) (X Y : Finset (Fin N)) :
-    (PEqualNP.GenericRejection.incidenceInput X Y).length = N + N := by
-  simp [PEqualNP.GenericRejection.incidenceInput]
-
-theorem inc_pt (N : ℕ) (X Y : Finset (Fin N)) (i : ℕ) (hi : i < N) :
-    (PEqualNP.GenericRejection.incidenceInput X Y).getD i false = decide (⟨i, hi⟩ ∈ X) := by
-  unfold PEqualNP.GenericRejection.incidenceInput
-  rw [List.getD_append _ _ _ _ (by simp; omega)]
-  simp [List.getD_eq_getElem?_getD, List.getElem?_ofFn, hi]
-
-theorem inc_ln (N : ℕ) (X Y : Finset (Fin N)) (i : ℕ) (hi : N ≤ i) (hi2 : i < N + N) :
-    (PEqualNP.GenericRejection.incidenceInput X Y).getD i false =
-      decide ((⟨i - N, by omega⟩ : Fin N) ∈ Y) := by
-  unfold PEqualNP.GenericRejection.incidenceInput
-  rw [List.getD_append_right _ _ _ _ (by simp; omega)]
-  have hl : (List.ofFn fun p : Fin N => decide (p ∈ X)).length = N := by simp
-  rw [hl]
-  have h3 : i - N < N := by omega
-  simp [List.getD_eq_getElem?_getD, List.getElem?_ofFn, h3]
-
-theorem input_read (N : ℕ) (S : Fin N → Finset (Fin N)) (C : Circuit)
-    (hC : PEqualNP.TopForm.IsAO2 (N + N) C)
-    (h1 : N + N ≤ C.output) (h2 : C.output < N + N + C.gates.length)
-    (hacc : PEqualNP.GenericRejection.RightOnIncidentPairs S C)
-    (hrej : ∀ X Y : Finset (Fin N), X.card + Y.card ≤ 3 →
-      PEqualNP.GenericRejection.IsFalseInput S X Y →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) = false)
-    (hpt : ∀ p : Fin N, ∃ l, p ∈ S l) (hln : ∀ l : Fin N, ∃ p, p ∈ S l) :
-    ∀ i < N + N, 1 ≤ readsIn C (cone (N + N) C) i := by
-  intro i hi
-  by_contra hcon
-  have h0 : readsIn C (cone (N + N) C) i = 0 := by omega
-  have hrb := hC.2.1
-  by_cases hiN : i < N
-  · obtain ⟨l, hl⟩ := hpt ⟨i, hiN⟩
-    have ha := hacc l ⟨i, hiN⟩ hl
-    have hr := hrej ∅ {l} (by simp) (by intro l' _; simp)
-    have := dep (N + N) C hrb h1 h2 i hi h0
-      (PEqualNP.GenericRejection.incidenceInput {⟨i, hiN⟩} {l})
-      (PEqualNP.GenericRejection.incidenceInput ∅ {l}) (inc_len _ _ _) (inc_len _ _ _) (by
-        intro j hj hji
-        by_cases hjN : j < N
-        · rw [inc_pt _ _ _ j hjN, inc_pt _ _ _ j hjN]
-          simp [Fin.ext_iff, hji]
-        · rw [inc_ln _ _ _ j (by omega) hj, inc_ln _ _ _ j (by omega) hj])
-    rw [ha, hr] at this
-    exact absurd this (by simp)
-  · obtain ⟨p, hp⟩ := hln ⟨i - N, by omega⟩
-    have ha := hacc ⟨i - N, by omega⟩ p hp
-    have hr := hrej {p} ∅ (by simp) (by intro l' hl'; simp at hl')
-    have := dep (N + N) C hrb h1 h2 i hi h0
-      (PEqualNP.GenericRejection.incidenceInput {p} {⟨i - N, by omega⟩})
-      (PEqualNP.GenericRejection.incidenceInput {p} ∅) (inc_len _ _ _) (inc_len _ _ _) (by
-        intro j hj hji
-        by_cases hjN : j < N
-        · rw [inc_pt _ _ _ j hjN, inc_pt _ _ _ j hjN]
-        · rw [inc_ln _ _ _ j (by omega) hj, inc_ln _ _ _ j (by omega) hj]
-          have hne : j - N ≠ i - N := by omega
-          simp [Fin.ext_iff, hne])
-    rw [ha, hr] at this
-    exact absurd this (by simp)
-
-theorem eval_mono (op : GateOp) (hop : op = GateOp.and ∨ op = GateOp.or) :
-    ∀ (l : List ℕ) (f g : ℕ → Bool), (∀ i ∈ l, f i = true → g i = true) →
-      op.eval (l.map f) = true → op.eval (l.map g) = true := by
-  intro l f g hfg h
-  rcases hop with rfl | rfl
-  · simp only [GateOp.eval, List.all_eq_true, List.mem_map, forall_exists_index, and_imp,
-      forall_apply_eq_imp_iff₂, id] at h ⊢
-    intro a ha
-    exact hfg a ha (h a ha)
-  · simp only [GateOp.eval, List.any_eq_true, List.mem_map, exists_exists_and_eq_and, id] at h ⊢
-    obtain ⟨a, ha, h1⟩ := h
-    exact ⟨a, ha, hfg a ha h1⟩
-
-theorem val_mono (m : ℕ) (C : Circuit) (hao : PEqualNP.EdgeOwnership.AndOrOnly C)
-    (hrb : ReadsBack m C) (x x' : List Bool) (hx : x.length = m) (hx' : x'.length = m)
-    (hle : ∀ i < m, x.getD i false = true → x'.getD i false = true) :
-    ∀ w, val C x w = true → val C x' w = true := by
-  intro w
-  induction w using Nat.strong_induction_on with
-  | _ w ih =>
-  intro hw
-  by_cases hwm : w < m
-  · rw [val_input C x w (by omega)] at hw
-    rw [val_input C x' w (by omega)]
-    exact hle w hwm hw
-  by_cases hwg : w < m + C.gates.length
-  · obtain ⟨k, rfl⟩ : ∃ k, w = m + k := ⟨w - m, by omega⟩
-    have hk : k < C.gates.length := by omega
-    rw [val_gate m C hrb x hx k hk] at hw
-    rw [val_gate m C hrb x' hx' k hk]
-    have hop : (gateAt C k).op = GateOp.and ∨ (gateAt C k).op = GateOp.or := by
-      have : gateAt C k = C.gates[k] := by
-        unfold gateAt; rw [List.getD_eq_getElem _ _ hk]
-      rw [this]
-      exact hao _ (List.getElem_mem hk)
-    refine eval_mono _ hop _ _ _ ?_ hw
-    intro i hi hv
-    exact ih i (hrb k hk i hi) hv
-  · exfalso
-    have : val C x w = false := by
-      show (C.wires x).getD w false = false
-      have hl : (C.wires x).length = m + C.gates.length := by
-        show (wf C.gates x).length = _
-        rw [wf_len, hx]
-      rw [List.getD_eq_default _ _ (by omega)]
-    rw [this] at hw
-    exact Bool.false_ne_true hw
-
-theorem inc_le (N : ℕ) (X X' Y Y' : Finset (Fin N)) (hX : X ⊆ X') (hY : Y ⊆ Y') :
-    ∀ i < N + N, (PEqualNP.GenericRejection.incidenceInput X Y).getD i false = true →
-      (PEqualNP.GenericRejection.incidenceInput X' Y').getD i false = true := by
-  intro i hi h
-  by_cases hin : i < N
-  · rw [inc_pt N X Y i hin] at h
-    rw [inc_pt N X' Y' i hin]
-    simp only [decide_eq_true_eq] at h ⊢
-    exact hX h
-  · rw [inc_ln N X Y i (by omega) hi] at h
-    rw [inc_ln N X' Y' i (by omega) hi]
-    simp only [decide_eq_true_eq] at h ⊢
-    exact hY h
-
-theorem val_mono_inc (N : ℕ) (C : Circuit) (hC : PEqualNP.TopForm.IsAO2 (N + N) C)
-    (X X' Y Y' : Finset (Fin N)) (hX : X ⊆ X') (hY : Y ⊆ Y') (w : ℕ)
-    (h : val C (PEqualNP.GenericRejection.incidenceInput X Y) w = true) :
-    val C (PEqualNP.GenericRejection.incidenceInput X' Y') w = true :=
-  val_mono (N + N) C hC.1 hC.2.1 _ _ (inc_len N X Y) (inc_len N X' Y') (inc_le N X X' Y Y' hX hY)
-    w h
-
-theorem eval_mono_inc (N : ℕ) (C : Circuit) (hC : PEqualNP.TopForm.IsAO2 (N + N) C)
-    (X X' Y Y' : Finset (Fin N)) (hX : X ⊆ X') (hY : Y ⊆ Y')
-    (h : C.eval (PEqualNP.GenericRejection.incidenceInput X Y) = true) :
-    C.eval (PEqualNP.GenericRejection.incidenceInput X' Y') = true :=
-  val_mono_inc N C hC X X' Y Y' hX hY C.output h
-
-theorem uniq_reader (m : ℕ) (C : Circuit) (w : ℕ) (hf : readsIn C (cone m C) w = 1)
-    (k k' : ℕ) (hk : k ∈ cone m C) (hw : w ∈ (gateAt C k).inputs) (hk' : k' ∈ cone m C)
-    (hw' : w ∈ (gateAt C k').inputs) : k = k' := by
-  by_contra hne
-  have hsub : ({k, k'} : Finset ℕ) ⊆ cone m C := by
-    intro x hx
-    simp only [Finset.mem_insert, Finset.mem_singleton] at hx
-    rcases hx with rfl | rfl
-    · exact hk
-    · exact hk'
-  have h1 := Finset.sum_le_sum_of_subset (f := fun j => (gateAt C j).inputs.count w) hsub
-  rw [Finset.sum_pair hne] at h1
-  have c1 : 1 ≤ (gateAt C k).inputs.count w := List.count_pos_iff.mpr hw
-  have c2 : 1 ≤ (gateAt C k').inputs.count w := List.count_pos_iff.mpr hw'
-  unfold readsIn at hf
-  omega
-
-theorem rtg_cone (m : ℕ) (C : Circuit) (w : ℕ) (hm : m ≤ w)
-    (h : Relation.ReflTransGen (RdBy m C) w C.output) (hw : w < m + C.gates.length) :
-    w - m ∈ cone m C := by
-  refine (mem_cone m C _).mpr ⟨by omega, ?_⟩
-  have e : m + (w - m) = w := by omega
-  rw [e]; exact h
-
-theorem reach (m : ℕ) (C : Circuit) (hrb : ReadsBack m C) (v t : ℕ)
-    (hpath : Relation.ReflTransGen (RdBy m C) v t)
-    (htout : Relation.ReflTransGen (RdBy m C) t C.output)
-    (hsingle : ∀ w, Relation.ReflTransGen (RdBy m C) v w →
-      Relation.ReflTransGen (RdBy m C) w C.output → w < t → readsIn C (cone m C) w = 1) :
-    ∀ w, Relation.ReflTransGen (RdBy m C) v w → Relation.ReflTransGen (RdBy m C) w C.output →
-      w ≤ t → Relation.ReflTransGen (RdBy m C) w t := by
-  intro w hvw
-  induction hvw with
-  | refl => intro _ _; exact hpath
-  | @tail w' w hvw' hstep ih =>
-    intro hwo hwt
-    have hlt : w' < w := rd_lt m C hrb _ _ hstep
-    have ih' := ih (Relation.ReflTransGen.head hstep hwo) (by omega)
-    rcases Relation.ReflTransGen.cases_head ih' with h | ⟨u, hu, hut⟩
-    · omega
-    · have hf := hsingle w' hvw' (Relation.ReflTransGen.head hstep hwo) (by omega)
-      obtain ⟨k, hk, rfl, hkin⟩ := hstep
-      obtain ⟨k', hk', rfl, hk'in⟩ := hu
-      have hkK : k ∈ cone m C := (mem_cone m C k).mpr ⟨hk, hwo⟩
-      have hk'K : k' ∈ cone m C := (mem_cone m C k').mpr ⟨hk', hut.trans htout⟩
-      have := uniq_reader m C w' hf k k' hkK hkin hk'K hk'in
-      subst this
-      exact hut
-
-theorem dominate (m : ℕ) (C : Circuit) (hrb : ReadsBack m C) (h1 : m ≤ C.output)
-    (h2 : C.output < m + C.gates.length) (V : Finset ℕ) (j : ℕ) (hj : j ∈ cone m C)
-    (hpath : ∀ v ∈ V, Relation.ReflTransGen (RdBy m C) v (m + j))
-    (hsingle : ∀ v ∈ V, ∀ w, Relation.ReflTransGen (RdBy m C) v w →
-      Relation.ReflTransGen (RdBy m C) w C.output → w < m + j → readsIn C (cone m C) w = 1)
-    (x x' : List Bool) (hx : x.length = m) (hx' : x'.length = m)
-    (hagr : ∀ i < m, i ∉ V → x.getD i false = x'.getD i false)
-    (hmj : val C x (m + j) = val C x' (m + j)) : C.eval x = C.eval x' := by
-  have hjo : Relation.ReflTransGen (RdBy m C) (m + j) C.output := ((mem_cone m C j).mp hj).2
-  let A : ℕ → Prop := fun w => ¬ ∃ v ∈ V, Relation.ReflTransGen (RdBy m C) v w ∧ w < m + j
-  have hin : ∀ i < m, A i → x.getD i false = x'.getD i false := by
-    intro i hi hA
-    apply hagr i hi
-    intro hiV
-    exact hA ⟨i, hiV, Relation.ReflTransGen.refl, by omega⟩
-  have hstep : ∀ k ∈ cone m C, k ∉ ({j} : Finset ℕ) → A (m + k) →
-      ∀ w ∈ (gateAt C k).inputs, A w := by
-    intro k hk hkj hA w hw hbad
-    obtain ⟨v, hv, hvw, hwlt⟩ := hbad
-    have hkl : k < C.gates.length := ((mem_cone m C k).mp hk).1
-    have hko : Relation.ReflTransGen (RdBy m C) (m + k) C.output := ((mem_cone m C k).mp hk).2
-    have hstepk : RdBy m C w (m + k) := ⟨k, hkl, rfl, hw⟩
-    have hwo : Relation.ReflTransGen (RdBy m C) w C.output := Relation.ReflTransGen.head hstepk hko
-    have hr := reach m C hrb v (m + j) (hpath v hv) hjo (hsingle v hv) w hvw hwo (by omega)
-    rcases Relation.ReflTransGen.cases_head hr with h | ⟨u, hu, hut⟩
-    · omega
-    · have hf := hsingle v hv w hvw hwo hwlt
-      obtain ⟨k', hk', rfl, hk'in⟩ := hu
-      have hk'K : k' ∈ cone m C := (mem_cone m C k').mpr ⟨hk', hut.trans hjo⟩
-      have := uniq_reader m C w hf k k' hk hw hk'K hk'in
-      subst this
-      have hle := rtg_le m C hrb _ _ hut
-      have hne : k ≠ j := by
-        intro e; apply hkj; simp [e]
-      apply hA
-      exact ⟨v, hv, Relation.ReflTransGen.tail hvw hstepk, by omega⟩
-  have hT : ∀ k ∈ cone m C, k ∈ ({j} : Finset ℕ) → val C x (m + k) = val C x' (m + k) := by
-    intro k _ hk
-    simp only [Finset.mem_singleton] at hk
-    subst hk; exact hmj
-  have hoK := out_mem m C h1 h2
-  have e : m + (C.output - m) = C.output := by omega
-  have hAo : A (m + (C.output - m)) := by
-    rintro ⟨v, _, _, hlt⟩
-    have := cone_le_out m C hrb j hj
-    omega
-  have := agree m C hrb x x' hx hx' {j} A hin hstep hT (C.output - m) hoK hAo
-  rw [e] at this
-  exact this
-
-def EP (m : ℕ) (C : Circuit) (v j : ℕ) : Prop :=
-  j ∈ cone m C ∧ Relation.ReflTransGen (RdBy m C) v (m + j) ∧ readsIn C (cone m C) (m + j) ≠ 1
-
-theorem ee_exists (m : ℕ) (C : Circuit) (hrb : ReadsBack m C) (h1 : m ≤ C.output)
-    (h2 : C.output < m + C.gates.length) (v : ℕ) (hv : 1 ≤ readsIn C (cone m C) v) :
-    ∃ j, EP m C v j := by
-  have hoK := out_mem m C h1 h2
-  have e : m + (C.output - m) = C.output := by omega
-  refine ⟨C.output - m, hoK, ?_, ?_⟩
-  · obtain ⟨k, hk, hkin⟩ : ∃ k ∈ cone m C, v ∈ (gateAt C k).inputs := by
-      by_contra hno
-      push_neg at hno
-      unfold readsIn at hv
-      have : ∑ j ∈ cone m C, (gateAt C j).inputs.count v = 0 :=
-        Finset.sum_eq_zero (fun j hj => List.count_eq_zero.mpr (hno j hj))
-      omega
-    obtain ⟨hkl, hko⟩ := (mem_cone m C k).mp hk
-    rw [e]
-    exact Relation.ReflTransGen.head ⟨k, hkl, rfl, hkin⟩ hko
-  · rw [e]
-    have := reads_out m C hrb (C.output - m) hoK (by omega)
-    rw [e] at this
-    omega
-
-open Classical in
-noncomputable def ee (m : ℕ) (C : Circuit) (v : ℕ) : ℕ :=
-  if h : ∃ j, EP m C v j then Nat.find h else 0
-
-theorem ee_spec (m : ℕ) (C : Circuit) (v : ℕ) (h : ∃ j, EP m C v j) : EP m C v (ee m C v) := by
-  classical
-  unfold ee
-  rw [dif_pos h]
-  exact Nat.find_spec h
-
-theorem ee_min (m : ℕ) (C : Circuit) (v j : ℕ) (hj : EP m C v j) : ee m C v ≤ j := by
-  classical
-  have h : ∃ j, EP m C v j := ⟨j, hj⟩
-  unfold ee
-  rw [dif_pos h]
-  exact Nat.find_min' h hj
-
-theorem ee_single (m : ℕ) (C : Circuit) (hrb : ReadsBack m C) (v : ℕ) (hv : v < m)
-    (hf : readsIn C (cone m C) v = 1) :
-    ∀ w, Relation.ReflTransGen (RdBy m C) v w → Relation.ReflTransGen (RdBy m C) w C.output →
-      w < m + ee m C v → readsIn C (cone m C) w = 1 := by
-  intro w hvw hwo hlt
-  rcases Relation.ReflTransGen.cases_tail hvw with h | ⟨u, _, hu⟩
-  · subst h; exact hf
-  · obtain ⟨k, hk, rfl, _⟩ := hu
-    have hkK : k ∈ cone m C := (mem_cone m C k).mpr ⟨hk, hwo⟩
-    by_contra hne
-    have := ee_min m C v k ⟨hkK, hvw, hne⟩
-    omega
-
-theorem val_out_range (m : ℕ) (C : Circuit) (x : List Bool) (hx : x.length = m) (w : ℕ)
-    (hw : m + C.gates.length ≤ w) : val C x w = false := by
-  show (C.wires x).getD w false = false
-  have hl : (C.wires x).length = m + C.gates.length := by
-    show (wf C.gates x).length = _
-    rw [wf_len, hx]
-  rw [List.getD_eq_default _ _ (by omega)]
-
-theorem indep (m : ℕ) (C : Circuit) (hrb : ReadsBack m C) (V : Finset ℕ) (x x' : List Bool)
-    (hx : x.length = m) (hx' : x'.length = m)
-    (hagr : ∀ i < m, i ∉ V → x.getD i false = x'.getD i false) :
-    ∀ w, (∀ v ∈ V, ¬ Relation.ReflTransGen (RdBy m C) v w) → val C x w = val C x' w := by
-  intro w
-  induction w using Nat.strong_induction_on with
-  | _ w ih =>
-  intro hno
-  by_cases hwm : w < m
-  · rw [val_input C x w (by omega), val_input C x' w (by omega)]
-    apply hagr w hwm
-    intro hwV
-    exact hno w hwV Relation.ReflTransGen.refl
-  by_cases hwg : w < m + C.gates.length
-  · obtain ⟨k, rfl⟩ : ∃ k, w = m + k := ⟨w - m, by omega⟩
-    have hk : k < C.gates.length := by omega
-    rw [val_gate m C hrb x hx k hk, val_gate m C hrb x' hx' k hk]
-    congr 1
-    apply List.map_congr_left
-    intro i hi
-    apply ih i (hrb k hk i hi)
-    intro v hv hvi
-    exact hno v hv (Relation.ReflTransGen.tail hvi ⟨k, hk, rfl, hi⟩)
-  · rw [val_out_range m C x hx w (by omega), val_out_range m C x' hx' w (by omega)]
-
-theorem input_only (m : ℕ) (C : Circuit) (u w : ℕ) (hw : w < m)
-    (h : Relation.ReflTransGen (RdBy m C) u w) : u = w := by
-  rcases Relation.ReflTransGen.cases_tail h with e | ⟨c, _, hc⟩
-  · exact e.symm
-  · obtain ⟨k, _, rfl, _⟩ := hc
-    omega
-
-theorem lca (m : ℕ) (C : Circuit) (hC : PEqualNP.TopForm.IsAO2 m C) (u v : ℕ) (hu : u < m)
-    (hv : v < m) (huv : u ≠ v) (j : ℕ) (hj : j ∈ cone m C)
-    (hju : Relation.ReflTransGen (RdBy m C) u (m + j))
-    (hjv : Relation.ReflTransGen (RdBy m C) v (m + j)) :
-    ∃ M, M ∈ cone m C ∧ M ≤ j ∧ Relation.ReflTransGen (RdBy m C) u (m + M) ∧
-      Relation.ReflTransGen (RdBy m C) v (m + M) ∧
-      ∃ a b, ((gateAt C M).inputs = [a, b] ∨ (gateAt C M).inputs = [b, a]) ∧
-        Relation.ReflTransGen (RdBy m C) u a ∧ ¬ Relation.ReflTransGen (RdBy m C) v a ∧
-        Relation.ReflTransGen (RdBy m C) v b ∧ ¬ Relation.ReflTransGen (RdBy m C) u b := by
-  classical
-  obtain ⟨_, hrb, hlen⟩ := hC
-  have hex : ∃ M, M ∈ cone m C ∧ Relation.ReflTransGen (RdBy m C) u (m + M) ∧
-      Relation.ReflTransGen (RdBy m C) v (m + M) := ⟨j, hj, hju, hjv⟩
-  let M := Nat.find hex
-  have hM : M ∈ cone m C ∧ Relation.ReflTransGen (RdBy m C) u (m + M) ∧
-      Relation.ReflTransGen (RdBy m C) v (m + M) := Nat.find_spec hex
-  have hMmin : ∀ M', M' ∈ cone m C → Relation.ReflTransGen (RdBy m C) u (m + M') →
-      Relation.ReflTransGen (RdBy m C) v (m + M') → M ≤ M' :=
-    fun M' h1 h2 h3 => Nat.find_min' hex ⟨h1, h2, h3⟩
-  obtain ⟨hMK, hMu, hMv⟩ := hM
-  have hMl : M < C.gates.length := ((mem_cone m C M).mp hMK).1
-  have hMo : Relation.ReflTransGen (RdBy m C) (m + M) C.output := ((mem_cone m C M).mp hMK).2
-  have common : ∀ w, Relation.ReflTransGen (RdBy m C) u w →
-      Relation.ReflTransGen (RdBy m C) v w → w ∈ (gateAt C M).inputs → False := by
-    intro w hw1 hw2 hwin
-    have hlt : w < m + M := hrb M hMl w hwin
-    by_cases hwm : w < m
-    · have e1 := input_only m C u w hwm hw1
-      have e2 := input_only m C v w hwm hw2
-      exact huv (e1.trans e2.symm)
-    · have hwK : w - m ∈ cone m C := cone_closed m C hrb M hMK w hwin (by omega)
-      have e : m + (w - m) = w := by omega
-      have := hMmin (w - m) hwK (by rw [e]; exact hw1) (by rw [e]; exact hw2)
-      omega
-  have hpre : ∀ t, t < m → Relation.ReflTransGen (RdBy m C) t (m + M) →
-      ∃ a ∈ (gateAt C M).inputs, Relation.ReflTransGen (RdBy m C) t a := by
-    intro t ht h
-    rcases Relation.ReflTransGen.cases_tail h with e | ⟨c, hc, hcM⟩
-    · omega
-    · obtain ⟨k, hk, hkM, hcin⟩ := hcM
-      have : k = M := by omega
-      subst this
-      exact ⟨c, hcin, hc⟩
-  obtain ⟨a, ha, hua⟩ := hpre u hu hMu
-  obtain ⟨b, hb, hvb⟩ := hpre v hv hMv
-  have hva : ¬ Relation.ReflTransGen (RdBy m C) v a := fun h => common a hua h ha
-  have hub : ¬ Relation.ReflTransGen (RdBy m C) u b := fun h => common b h hvb hb
-  have hab : a ≠ b := by
-    intro e; subst e; exact hva hvb
-  have hl2 : (gateAt C M).inputs.length = 2 := by
-    have : gateAt C M = C.gates[M] := by
-      unfold gateAt; rw [List.getD_eq_getElem _ _ hMl]
-    rw [this]; exact hlen _ (List.getElem_mem hMl)
-  refine ⟨M, hMK, hMmin j hj hju hjv, hMu, hMv, a, b, ?_, hua, hva, hvb, hub⟩
-  match hL : (gateAt C M).inputs, hl2 with
-  | [c, d], _ =>
-    rw [hL] at ha hb
-    simp only [List.mem_cons, List.not_mem_nil, or_false] at ha hb
-    rcases ha with rfl | rfl <;> rcases hb with rfl | rfl
-    · exact absurd rfl hab
-    · left; rfl
-    · right; rfl
-    · exact absurd rfl hab
-
-theorem bstar_case (N : ℕ) (S : Fin N → Finset (Fin N)) (C : Circuit)
-    (hC : PEqualNP.TopForm.IsAO2 (N + N) C)
-    (hacc : PEqualNP.GenericRejection.RightOnIncidentPairs S C)
-    (hrej : ∀ X Y : Finset (Fin N), X.card + Y.card ≤ 3 →
-      PEqualNP.GenericRejection.IsFalseInput S X Y →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) = false)
-    (p l p' l' : Fin N) (hpl : p ∈ S l) (hp'l : p' ∈ S l) (hpl' : p ∈ S l')
-    (hp'l' : p' ∉ S l') (hne : p' ≠ p)
-    (M a b : ℕ) (op : GateOp) (hop : op = GateOp.and ∨ op = GateOp.or)
-    (hval : ∀ X Y : Finset (Fin N),
-      val C (PEqualNP.GenericRejection.incidenceInput X Y) M =
-        op.eval [val C (PEqualNP.GenericRejection.incidenceInput X Y) a,
-          val C (PEqualNP.GenericRejection.incidenceInput X Y) b])
-    (hdom : ∀ X Y X' Y' : Finset (Fin N), (∀ r, r ≠ p → (r ∈ X ↔ r ∈ X')) →
-      (∀ k, k ≠ l → (k ∈ Y ↔ k ∈ Y')) →
-      val C (PEqualNP.GenericRejection.incidenceInput X Y) M =
-        val C (PEqualNP.GenericRejection.incidenceInput X' Y') M →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) =
-        C.eval (PEqualNP.GenericRejection.incidenceInput X' Y'))
-    (hA : ∀ X Y Y' : Finset (Fin N), (∀ k, k ≠ l → (k ∈ Y ↔ k ∈ Y')) →
-      val C (PEqualNP.GenericRejection.incidenceInput X Y) a =
-        val C (PEqualNP.GenericRejection.incidenceInput X Y') a)
-    (hB : ∀ X X' Y : Finset (Fin N), (∀ r, r ≠ p → (r ∈ X ↔ r ∈ X')) →
-      val C (PEqualNP.GenericRejection.incidenceInput X Y) b =
-        val C (PEqualNP.GenericRejection.incidenceInput X' Y) b) : False := by
-  classical
-  have hl'l : l' ≠ l := by
-    intro e; exact hp'l' (e ▸ hp'l)
-  have r1 : C.eval (PEqualNP.GenericRejection.incidenceInput {p} {l}) = true := hacc l p hpl
-  have r2 : C.eval (PEqualNP.GenericRejection.incidenceInput {p} (∅ : Finset (Fin N))) = false :=
-    hrej _ _ (by simp) (by intro k hk; simp at hk)
-  have r3 : C.eval (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l}) = false :=
-    hrej _ _ (by simp) (by intro k _; simp)
-  rcases hop with rfl | rfl
-  · have r4 : C.eval (PEqualNP.GenericRejection.incidenceInput {p} {l'}) = true := hacc l' p hpl'
-    have r5 : C.eval (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l'}) = false :=
-      hrej _ _ (by simp) (by intro k _; simp)
-    have r6 : C.eval (PEqualNP.GenericRejection.incidenceInput {p'} {l}) = true := hacc l p' hp'l
-    have r7 : C.eval (PEqualNP.GenericRejection.incidenceInput {p'} (∅ : Finset (Fin N))) = false :=
-      hrej _ _ (by simp) (by intro k hk; simp at hk)
-    have r8 : C.eval (PEqualNP.GenericRejection.incidenceInput {p'} {l'}) = false := by
-      apply hrej _ _ (by simp)
-      intro k hk
-      rw [Finset.mem_singleton] at hk
-      subst hk
-      exact Finset.disjoint_singleton_right.mpr hp'l'
-    have hb1 : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l'}) b = true := by
-      by_contra hb
-      have hb0 : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l'}) b = false := by
-        simpa using hb
-      have hb0' : val C (PEqualNP.GenericRejection.incidenceInput {p} {l'}) b = false := by
-        rw [hB {p} (∅ : Finset (Fin N)) {l'} (by intro r hr; simp [hr])]; exact hb0
-      have := hdom {p} {l'} (∅ : Finset (Fin N)) {l'} (by intro r hr; simp [hr]) (by intro k _; rfl) (by
-        rw [hval, hval]; simp [GateOp.eval, hb0, hb0'])
-      rw [r4, r5] at this; exact absurd this (by simp)
-    have ha1 : val C (PEqualNP.GenericRejection.incidenceInput {p'} (∅ : Finset (Fin N))) a = true := by
-      by_contra ha
-      have ha0 : val C (PEqualNP.GenericRejection.incidenceInput {p'} (∅ : Finset (Fin N))) a = false := by
-        simpa using ha
-      have ha0' : val C (PEqualNP.GenericRejection.incidenceInput {p'} {l}) a = false := by
-        rw [hA {p'} {l} (∅ : Finset (Fin N)) (by intro k hk; simp [hk])]; exact ha0
-      have := hdom {p'} {l} {p'} (∅ : Finset (Fin N)) (by intro r _; rfl) (by intro k hk; simp [hk]) (by
-        rw [hval, hval]; simp [GateOp.eval, ha0, ha0'])
-      rw [r6, r7] at this; exact absurd this (by simp)
-    have ha2 : val C (PEqualNP.GenericRejection.incidenceInput {p'} {l'}) a = true :=
-      val_mono_inc N C hC _ _ _ _ (le_refl _) (by simp) a ha1
-    have hb2 : val C (PEqualNP.GenericRejection.incidenceInput {p'} {l'}) b = true :=
-      val_mono_inc N C hC _ _ _ _ (by simp) (le_refl _) b hb1
-    have ha3 : val C (PEqualNP.GenericRejection.incidenceInput {p, p'} {l'}) a = true :=
-      val_mono_inc N C hC _ _ _ _ (by simp) (le_refl _) a ha2
-    have hb3 : val C (PEqualNP.GenericRejection.incidenceInput {p, p'} {l'}) b = true := by
-      rw [← hB {p'} {p, p'} {l'} (by intro r hr; simp [hr])]; exact hb2
-    have r9 : C.eval (PEqualNP.GenericRejection.incidenceInput {p, p'} {l'}) = true :=
-      eval_mono_inc N C hC _ _ _ _ (by simp) (le_refl _) r4
-    have := hdom {p'} {l'} {p, p'} {l'} (by intro r hr; simp [hr]) (by intro k _; rfl) (by
-      rw [hval, hval]; simp [GateOp.eval, ha2, hb2, ha3, hb3])
-    rw [r8, r9] at this; exact absurd this (by simp)
-  · have ha0 : val C (PEqualNP.GenericRejection.incidenceInput {p} (∅ : Finset (Fin N))) a = false := by
-      by_contra ha
-      have ha1 : val C (PEqualNP.GenericRejection.incidenceInput {p} (∅ : Finset (Fin N))) a = true := by
-        simpa using ha
-      have ha1' : val C (PEqualNP.GenericRejection.incidenceInput {p} {l}) a = true := by
-        rw [← hA {p} (∅ : Finset (Fin N)) {l} (by intro k hk; simp [hk])]; exact ha1
-      have := hdom {p} (∅ : Finset (Fin N)) {p} {l} (by intro r _; rfl) (by intro k hk; simp [hk]) (by
-        rw [hval, hval]; simp [GateOp.eval, ha1, ha1'])
-      rw [r2, r1] at this; exact absurd this (by simp)
-    have ha00 : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l}) a = false := by
-      rw [hA (∅ : Finset (Fin N)) {l} (∅ : Finset (Fin N)) (by intro k hk; simp [hk])]
-      by_contra ha
-      have ha1 : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) (∅ : Finset (Fin N))) a = true := by
-        simpa using ha
-      have := val_mono_inc N C hC (∅ : Finset (Fin N)) {p} (∅ : Finset (Fin N)) (∅ : Finset (Fin N)) (by simp) (le_refl _) a ha1
-      rw [ha0] at this; exact absurd this (by simp)
-    have ha01 : val C (PEqualNP.GenericRejection.incidenceInput {p} {l}) a = false := by
-      rw [← hA {p} (∅ : Finset (Fin N)) {l} (by intro k hk; simp [hk])]; exact ha0
-    have hbb : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l}) b =
-        val C (PEqualNP.GenericRejection.incidenceInput {p} {l}) b :=
-      hB (∅ : Finset (Fin N)) {p} {l} (by intro r hr; simp [hr])
-    have := hdom (∅ : Finset (Fin N)) {l} {p} {l} (by intro r hr; simp [hr]) (by intro k _; rfl) (by
-      rw [hval, hval]; simp [GateOp.eval, ha00, ha01, hbb])
-    rw [r3, r1] at this; exact absurd this (by simp)
-
-
-theorem inc_agree (N : ℕ) (X Y X' Y' : Finset (Fin N)) (p l : Fin N)
-    (hX : ∀ r, r ≠ p → (r ∈ X ↔ r ∈ X')) (hY : ∀ k, k ≠ l → (k ∈ Y ↔ k ∈ Y')) :
-    ∀ i < N + N, i ∉ ({p.val, N + l.val} : Finset ℕ) →
-      (PEqualNP.GenericRejection.incidenceInput X Y).getD i false =
-        (PEqualNP.GenericRejection.incidenceInput X' Y').getD i false := by
-  intro i hi hiV
-  simp only [Finset.mem_insert, Finset.mem_singleton, not_or] at hiV
-  by_cases hin : i < N
-  · rw [inc_pt N X Y i hin, inc_pt N X' Y' i hin]
-    have := hX ⟨i, hin⟩ (by intro e; apply hiV.1; rw [← e])
-    simp [this]
-  · rw [inc_ln N X Y i (by omega) hi, inc_ln N X' Y' i (by omega) hi]
-    have := hY ⟨i - N, by omega⟩ (by intro e; apply hiV.2; rw [← e]; simp; omega)
-    simp [this]
-
-theorem bstar_chain (N : ℕ) (S : Fin N → Finset (Fin N)) (C : Circuit)
-    (hC : PEqualNP.TopForm.IsAO2 (N + N) C)
-    (h1 : N + N ≤ C.output) (h2 : C.output < N + N + C.gates.length)
-    (hacc : PEqualNP.GenericRejection.RightOnIncidentPairs S C)
-    (hrej : ∀ X Y : Finset (Fin N), X.card + Y.card ≤ 3 →
-      PEqualNP.GenericRejection.IsFalseInput S X Y →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) = false)
-    (p l p' l' : Fin N) (hpl : p ∈ S l) (hp'l : p' ∈ S l) (hpl' : p ∈ S l')
-    (hp'l' : p' ∉ S l') (hne : p' ≠ p)
-    (hfp : readsIn C (cone (N + N) C) p.val = 1)
-    (hfl : readsIn C (cone (N + N) C) (N + l.val) = 1) :
-    ee (N + N) C p.val ≠ ee (N + N) C (N + l.val) := by
-  intro hE
-  have hrb := hC.2.1
-  have exu := ee_exists (N + N) C hrb h1 h2 p.val (by omega)
-  have exv := ee_exists (N + N) C hrb h1 h2 (N + l.val) (by omega)
-  obtain ⟨hjK, hju, _⟩ := ee_spec (N + N) C p.val exu
-  obtain ⟨_, hjv, _⟩ := ee_spec (N + N) C (N + l.val) exv
-  rw [hE] at hjK hju
-  obtain ⟨M, hMK, hMle, hMu, hMv, a, b, hab, hua, hva, hvb, hub⟩ :=
-    lca (N + N) C hC p.val (N + l.val) (by omega) (by omega) (by omega) _ hjK hju hjv
-  have hMl : M < C.gates.length := ((mem_cone (N + N) C M).mp hMK).1
-  have hop : (gateAt C M).op = GateOp.and ∨ (gateAt C M).op = GateOp.or := by
-    have : gateAt C M = C.gates[M] := by
-      unfold gateAt; rw [List.getD_eq_getElem _ _ hMl]
-    rw [this]; exact hC.1 _ (List.getElem_mem hMl)
-  refine bstar_case N S C hC hacc hrej p l p' l' hpl hp'l hpl' hp'l' hne (N + N + M) a b
-    (gateAt C M).op hop ?_ ?_ ?_ ?_
-  · intro X Y
-    rw [val_gate (N + N) C hrb _ (inc_len N X Y) M hMl]
-    rcases hab with h | h <;> rw [h]
-    · rfl
-    · rcases hop with ho | ho <;> rw [ho] <;> simp [GateOp.eval, Bool.and_comm, Bool.or_comm]
-  · intro X Y X' Y' hX hY hval
-    apply dominate (N + N) C hrb h1 h2 {p.val, N + l.val} M hMK
-    · intro v hv
-      simp only [Finset.mem_insert, Finset.mem_singleton] at hv
-      rcases hv with rfl | rfl
-      · exact hMu
-      · exact hMv
-    · intro v hv w hvw hwo hwlt
-      simp only [Finset.mem_insert, Finset.mem_singleton] at hv
-      rcases hv with rfl | rfl
-      · exact ee_single (N + N) C hrb _ (by omega) hfp w hvw hwo (by rw [hE] at *; omega)
-      · exact ee_single (N + N) C hrb _ (by omega) hfl w hvw hwo (by omega)
-    · exact inc_len N X Y
-    · exact inc_len N X' Y'
-    · exact inc_agree N X Y X' Y' p l hX hY
-    · exact hval
-  · intro X Y Y' hY
-    apply indep (N + N) C hrb {N + l.val} _ _ (inc_len N X Y) (inc_len N X Y')
-    · intro i hi hiV
-      have := inc_agree N X Y X Y' p l (fun r _ => Iff.rfl) hY i hi
-      by_cases hip : i = p.val
-      · subst hip
-        rw [inc_pt N X Y _ p.isLt, inc_pt N X Y' _ p.isLt]
-      · apply this
-        simp only [Finset.mem_insert, Finset.mem_singleton, not_or]
-        exact ⟨hip, by simpa using hiV⟩
-    · intro v hv
-      simp only [Finset.mem_singleton] at hv
-      subst hv; exact hva
-  · intro X X' Y hX
-    apply indep (N + N) C hrb {p.val} _ _ (inc_len N X Y) (inc_len N X' Y)
-    · intro i hi hiV
-      have := inc_agree N X Y X' Y p l hX (fun k _ => Iff.rfl) i hi
-      by_cases hil : i = N + l.val
-      · subst hil
-        rw [inc_ln N X Y _ (by omega) hi, inc_ln N X' Y _ (by omega) hi]
-      · apply this
-        simp only [Finset.mem_insert, Finset.mem_singleton, not_or]
-        exact ⟨by simpa using hiV, hil⟩
-    · intro v hv
-      simp only [Finset.mem_singleton] at hv
-      subst hv; exact hub
-
-theorem inj_mixed (N : ℕ) (S : Fin N → Finset (Fin N)) (C : Circuit)
-    (hC : PEqualNP.TopForm.IsAO2 (N + N) C)
-    (hacc : PEqualNP.GenericRejection.RightOnIncidentPairs S C)
-    (hrej : ∀ X Y : Finset (Fin N), X.card + Y.card ≤ 3 →
-      PEqualNP.GenericRejection.IsFalseInput S X Y →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) = false)
-    (p l p' l' : Fin N) (hpl : p ∈ S l) (hp'l' : p' ∈ S l') (w : ℕ)
-    (hdom : ∀ X Y X' Y' : Finset (Fin N), (∀ r, r ≠ p → (r ∈ X ↔ r ∈ X')) →
-      (∀ k, k ≠ l' → (k ∈ Y ↔ k ∈ Y')) →
-      val C (PEqualNP.GenericRejection.incidenceInput X Y) w =
-        val C (PEqualNP.GenericRejection.incidenceInput X' Y') w →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) =
-        C.eval (PEqualNP.GenericRejection.incidenceInput X' Y'))
-    (hI : ∀ X X' Y Y' : Finset (Fin N), (∀ r, r ≠ p' → (r ∈ X ↔ r ∈ X')) →
-      (∀ k, k ≠ l → (k ∈ Y ↔ k ∈ Y')) →
-      val C (PEqualNP.GenericRejection.incidenceInput X Y) w =
-        val C (PEqualNP.GenericRejection.incidenceInput X' Y') w) : False := by
-  classical
-  have r1 : C.eval (PEqualNP.GenericRejection.incidenceInput {p} {l}) = true := hacc l p hpl
-  have r2 : C.eval (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l}) = false :=
-    hrej _ _ (by simp) (by intro k _; simp)
-  have r3 : C.eval (PEqualNP.GenericRejection.incidenceInput {p'} {l'}) = true := hacc l' p' hp'l'
-  have r4 : C.eval (PEqualNP.GenericRejection.incidenceInput {p'} (∅ : Finset (Fin N))) = false :=
-    hrej _ _ (by simp) (by intro k hk; simp at hk)
-  have r5 : C.eval (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l, l'}) = false := by
-    apply hrej _ _ (by simp; exact le_trans (Finset.card_le_two) (by norm_num))
-    intro k _; simp
-  have s1 : val C (PEqualNP.GenericRejection.incidenceInput {p} {l}) w = true := by
-    by_contra h
-    have h0 : val C (PEqualNP.GenericRejection.incidenceInput {p} {l}) w = false := by simpa using h
-    have h00 : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l}) w = false := by
-      by_contra h'
-      have := val_mono_inc N C hC (∅ : Finset (Fin N)) {p} {l} {l} (by simp) (le_refl _) w
-        (by simpa using h')
-      rw [h0] at this; exact absurd this (by simp)
-    have := hdom {p} {l} (∅ : Finset (Fin N)) {l} (by intro r hr; simp [hr]) (by intro k _; rfl)
-      (by rw [h0, h00])
-    rw [r1, r2] at this; exact absurd this (by simp)
-  have s2 : val C (PEqualNP.GenericRejection.incidenceInput {p'} {l'}) w = true := by
-    by_contra h
-    have h0 : val C (PEqualNP.GenericRejection.incidenceInput {p'} {l'}) w = false := by simpa using h
-    have h00 : val C (PEqualNP.GenericRejection.incidenceInput {p'} (∅ : Finset (Fin N))) w = false := by
-      by_contra h'
-      have := val_mono_inc N C hC {p'} {p'} (∅ : Finset (Fin N)) {l'} (le_refl _) (by simp) w
-        (by simpa using h')
-      rw [h0] at this; exact absurd this (by simp)
-    have := hdom {p'} {l'} {p'} (∅ : Finset (Fin N)) (by intro r _; rfl) (by intro k hk; simp [hk])
-      (by rw [h0, h00])
-    rw [r3, r4] at this; exact absurd this (by simp)
-  have s3 : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l'}) w = true := by
-    rw [← hI {p'} (∅ : Finset (Fin N)) {l'} {l'} (by intro r hr; simp [hr]) (by intro k _; rfl)]
-    exact s2
-  have s4 : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l, l'}) w = true :=
-    val_mono_inc N C hC _ _ _ _ (le_refl _) (by simp) w s3
-  have := hdom {p} {l} (∅ : Finset (Fin N)) {l, l'} (by intro r hr; simp [hr])
-    (by intro k hk; simp [hk]) (by rw [s1, s4])
-  rw [r1, r5] at this; exact absurd this (by simp)
-
-theorem inj_pts (N : ℕ) (S : Fin N → Finset (Fin N)) (C : Circuit)
-    (hC : PEqualNP.TopForm.IsAO2 (N + N) C)
-    (hacc : PEqualNP.GenericRejection.RightOnIncidentPairs S C)
-    (hrej : ∀ X Y : Finset (Fin N), X.card + Y.card ≤ 3 →
-      PEqualNP.GenericRejection.IsFalseInput S X Y →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) = false)
-    (p l p' l' : Fin N) (hpl : p ∈ S l) (hp'l' : p' ∈ S l') (hp'l : p' ∉ S l) (w : ℕ)
-    (hdom : ∀ X Y X' : Finset (Fin N), (∀ r, r ≠ p → r ≠ p' → (r ∈ X ↔ r ∈ X')) →
-      val C (PEqualNP.GenericRejection.incidenceInput X Y) w =
-        val C (PEqualNP.GenericRejection.incidenceInput X' Y) w →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) =
-        C.eval (PEqualNP.GenericRejection.incidenceInput X' Y))
-    (hI : ∀ X Y Y' : Finset (Fin N), (∀ k, k ≠ l → k ≠ l' → (k ∈ Y ↔ k ∈ Y')) →
-      val C (PEqualNP.GenericRejection.incidenceInput X Y) w =
-        val C (PEqualNP.GenericRejection.incidenceInput X Y') w) : False := by
-  classical
-  have r1 : C.eval (PEqualNP.GenericRejection.incidenceInput {p} {l}) = true := hacc l p hpl
-  have r2 : C.eval (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l}) = false :=
-    hrej _ _ (by simp) (by intro k _; simp)
-  have r3 : C.eval (PEqualNP.GenericRejection.incidenceInput {p'} {l'}) = true := hacc l' p' hp'l'
-  have r4 : C.eval (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l'}) = false :=
-    hrej _ _ (by simp) (by intro k _; simp)
-  have r5 : C.eval (PEqualNP.GenericRejection.incidenceInput {p'} {l}) = false := by
-    apply hrej _ _ (by simp)
-    intro k hk
-    rw [Finset.mem_singleton] at hk
-    subst hk
-    exact Finset.disjoint_singleton_right.mpr hp'l
-  have eA : val C (PEqualNP.GenericRejection.incidenceInput {p} {l}) w =
-      val C (PEqualNP.GenericRejection.incidenceInput {p} (∅ : Finset (Fin N))) w :=
-    hI _ _ _ (by intro k hk _; simp [hk])
-  have eB : val C (PEqualNP.GenericRejection.incidenceInput {p'} {l}) w =
-      val C (PEqualNP.GenericRejection.incidenceInput {p'} (∅ : Finset (Fin N))) w :=
-    hI _ _ _ (by intro k hk _; simp [hk])
-  have eB' : val C (PEqualNP.GenericRejection.incidenceInput {p'} {l'}) w =
-      val C (PEqualNP.GenericRejection.incidenceInput {p'} (∅ : Finset (Fin N))) w :=
-    hI _ _ _ (by intro k _ hk; simp [hk])
-  have eZ : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l}) w =
-      val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) (∅ : Finset (Fin N))) w :=
-    hI _ _ _ (by intro k hk _; simp [hk])
-  have eZ' : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l'}) w =
-      val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) (∅ : Finset (Fin N))) w :=
-    hI _ _ _ (by intro k _ hk; simp [hk])
-  have mA : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) (∅ : Finset (Fin N))) w = true →
-      val C (PEqualNP.GenericRejection.incidenceInput {p} (∅ : Finset (Fin N))) w = true :=
-    val_mono_inc N C hC _ _ _ _ (by simp) (le_refl _) w
-  have mB : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) (∅ : Finset (Fin N))) w = true →
-      val C (PEqualNP.GenericRejection.incidenceInput {p'} (∅ : Finset (Fin N))) w = true :=
-    val_mono_inc N C hC _ _ _ _ (by simp) (le_refl _) w
-  have hAB : val C (PEqualNP.GenericRejection.incidenceInput {p} (∅ : Finset (Fin N))) w ≠
-      val C (PEqualNP.GenericRejection.incidenceInput {p'} (∅ : Finset (Fin N))) w := by
-    intro h
-    have := hdom {p} {l} {p'} (by intro r h1 h2; simp [h1, h2]) (by rw [eA, eB, h])
-    rw [r1, r5] at this; exact absurd this (by simp)
-  cases hA : val C (PEqualNP.GenericRejection.incidenceInput {p} (∅ : Finset (Fin N))) w <;>
-    cases hB : val C (PEqualNP.GenericRejection.incidenceInput {p'} (∅ : Finset (Fin N))) w <;>
-    rw [hA, hB] at hAB <;> simp at hAB
-  · have hZ : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) (∅ : Finset (Fin N))) w = false := by
-      cases hz : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) (∅ : Finset (Fin N))) w
-      · rfl
-      · have := mA hz; rw [hA] at this; exact absurd this (by simp)
-    have := hdom {p} {l} (∅ : Finset (Fin N)) (by intro r h1 _; simp [h1]) (by rw [eA, eZ, hA, hZ])
-    rw [r1, r2] at this; exact absurd this (by simp)
-  · have hZ : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) (∅ : Finset (Fin N))) w = false := by
-      cases hz : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) (∅ : Finset (Fin N))) w
-      · rfl
-      · have := mB hz; rw [hB] at this; exact absurd this (by simp)
-    have := hdom {p'} {l'} (∅ : Finset (Fin N)) (by intro r _ h2; simp [h2]) (by rw [eB', eZ', hB, hZ])
-    rw [r3, r4] at this; exact absurd this (by simp)
-
-theorem inj_lns (N : ℕ) (S : Fin N → Finset (Fin N)) (C : Circuit)
-    (hC : PEqualNP.TopForm.IsAO2 (N + N) C)
-    (hacc : PEqualNP.GenericRejection.RightOnIncidentPairs S C)
-    (hrej : ∀ X Y : Finset (Fin N), X.card + Y.card ≤ 3 →
-      PEqualNP.GenericRejection.IsFalseInput S X Y →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) = false)
-    (p l p' l' : Fin N) (hpl : p ∈ S l) (hp'l' : p' ∈ S l') (hpl' : p ∉ S l') (w : ℕ)
-    (hdom : ∀ X Y Y' : Finset (Fin N), (∀ k, k ≠ l → k ≠ l' → (k ∈ Y ↔ k ∈ Y')) →
-      val C (PEqualNP.GenericRejection.incidenceInput X Y) w =
-        val C (PEqualNP.GenericRejection.incidenceInput X Y') w →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) =
-        C.eval (PEqualNP.GenericRejection.incidenceInput X Y'))
-    (hI : ∀ X X' Y : Finset (Fin N), (∀ r, r ≠ p → r ≠ p' → (r ∈ X ↔ r ∈ X')) →
-      val C (PEqualNP.GenericRejection.incidenceInput X Y) w =
-        val C (PEqualNP.GenericRejection.incidenceInput X' Y) w) : False := by
-  classical
-  have r1 : C.eval (PEqualNP.GenericRejection.incidenceInput {p} {l}) = true := hacc l p hpl
-  have r2 : C.eval (PEqualNP.GenericRejection.incidenceInput {p} (∅ : Finset (Fin N))) = false :=
-    hrej _ _ (by simp) (by intro k hk; simp at hk)
-  have r3 : C.eval (PEqualNP.GenericRejection.incidenceInput {p'} {l'}) = true := hacc l' p' hp'l'
-  have r4 : C.eval (PEqualNP.GenericRejection.incidenceInput {p'} (∅ : Finset (Fin N))) = false :=
-    hrej _ _ (by simp) (by intro k hk; simp at hk)
-  have r5 : C.eval (PEqualNP.GenericRejection.incidenceInput {p} {l'}) = false := by
-    apply hrej _ _ (by simp)
-    intro k hk
-    rw [Finset.mem_singleton] at hk
-    subst hk
-    exact Finset.disjoint_singleton_right.mpr hpl'
-  have eA : val C (PEqualNP.GenericRejection.incidenceInput {p} {l}) w =
-      val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l}) w :=
-    hI _ _ _ (by intro r hr _; simp [hr])
-  have eB : val C (PEqualNP.GenericRejection.incidenceInput {p} {l'}) w =
-      val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l'}) w :=
-    hI _ _ _ (by intro r hr _; simp [hr])
-  have eB' : val C (PEqualNP.GenericRejection.incidenceInput {p'} {l'}) w =
-      val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l'}) w :=
-    hI _ _ _ (by intro r _ hr; simp [hr])
-  have eZ : val C (PEqualNP.GenericRejection.incidenceInput {p} (∅ : Finset (Fin N))) w =
-      val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) (∅ : Finset (Fin N))) w :=
-    hI _ _ _ (by intro r hr _; simp [hr])
-  have eZ' : val C (PEqualNP.GenericRejection.incidenceInput {p'} (∅ : Finset (Fin N))) w =
-      val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) (∅ : Finset (Fin N))) w :=
-    hI _ _ _ (by intro r _ hr; simp [hr])
-  have mA : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) (∅ : Finset (Fin N))) w = true →
-      val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l}) w = true :=
-    val_mono_inc N C hC _ _ _ _ (le_refl _) (by simp) w
-  have mB : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) (∅ : Finset (Fin N))) w = true →
-      val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l'}) w = true :=
-    val_mono_inc N C hC _ _ _ _ (le_refl _) (by simp) w
-  have hAB : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l}) w ≠
-      val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l'}) w := by
-    intro h
-    have := hdom {p} {l} {l'} (by intro k h1 h2; simp [h1, h2]) (by rw [eA, eB, h])
-    rw [r1, r5] at this; exact absurd this (by simp)
-  cases hA : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l}) w <;>
-    cases hB : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) {l'}) w <;>
-    rw [hA, hB] at hAB <;> simp at hAB
-  · have hZ : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) (∅ : Finset (Fin N))) w = false := by
-      cases hz : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) (∅ : Finset (Fin N))) w
-      · rfl
-      · have := mA hz; rw [hA] at this; exact absurd this (by simp)
-    have := hdom {p} {l} (∅ : Finset (Fin N)) (by intro k h1 _; simp [h1]) (by rw [eA, eZ, hA, hZ])
-    rw [r1, r2] at this; exact absurd this (by simp)
-  · have hZ : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) (∅ : Finset (Fin N))) w = false := by
-      cases hz : val C (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) (∅ : Finset (Fin N))) w
-      · rfl
-      · have := mB hz; rw [hB] at this; exact absurd this (by simp)
-    have := hdom {p'} {l'} (∅ : Finset (Fin N)) (by intro k _ h2; simp [h2]) (by rw [eB', eZ', hB, hZ])
-    rw [r3, r4] at this; exact absurd this (by simp)
-
-
-theorem inc_agreeV (N : ℕ) (X Y X' Y' : Finset (Fin N)) (V : Finset ℕ)
-    (hX : ∀ r : Fin N, r.val ∉ V → (r ∈ X ↔ r ∈ X'))
-    (hY : ∀ k : Fin N, N + k.val ∉ V → (k ∈ Y ↔ k ∈ Y')) :
-    ∀ i < N + N, i ∉ V →
-      (PEqualNP.GenericRejection.incidenceInput X Y).getD i false =
-        (PEqualNP.GenericRejection.incidenceInput X' Y').getD i false := by
-  intro i hi hiV
-  by_cases hin : i < N
-  · rw [inc_pt N X Y i hin, inc_pt N X' Y' i hin]
-    have := hX ⟨i, hin⟩ hiV
-    simp [this]
-  · rw [inc_ln N X Y i (by omega) hi, inc_ln N X' Y' i (by omega) hi]
-    have := hY ⟨i - N, by omega⟩ (by simp only; rw [show N + (i - N) = i by omega]; exact hiV)
-    simp [this]
-
-theorem not_reach (m : ℕ) (C : Circuit) (u v w0 : ℕ) (hu : EP m C u w0)
-    (hlt : w0 < ee m C v) : ¬ Relation.ReflTransGen (RdBy m C) v (m + w0) := by
-  intro h
-  have := ee_min m C v w0 ⟨hu.1, h, hu.2.2⟩
-  omega
-
-theorem dom_pair (N : ℕ) (C : Circuit) (hC : PEqualNP.TopForm.IsAO2 (N + N) C)
-    (h1 : N + N ≤ C.output) (h2 : C.output < N + N + C.gates.length) (u v : ℕ)
-    (hu : u < N + N) (hv : v < N + N)
-    (hfu : readsIn C (cone (N + N) C) u = 1) (hfv : readsIn C (cone (N + N) C) v = 1)
-    (hE : ee (N + N) C u = ee (N + N) C v) (X Y X' Y' : Finset (Fin N))
-    (hX : ∀ r : Fin N, r.val ∉ ({u, v} : Finset ℕ) → (r ∈ X ↔ r ∈ X'))
-    (hY : ∀ k : Fin N, N + k.val ∉ ({u, v} : Finset ℕ) → (k ∈ Y ↔ k ∈ Y'))
-    (hval : val C (PEqualNP.GenericRejection.incidenceInput X Y) (N + N + ee (N + N) C u) =
-      val C (PEqualNP.GenericRejection.incidenceInput X' Y') (N + N + ee (N + N) C u)) :
-    C.eval (PEqualNP.GenericRejection.incidenceInput X Y) =
-      C.eval (PEqualNP.GenericRejection.incidenceInput X' Y') := by
-  have hrb := hC.2.1
-  have exu := ee_exists (N + N) C hrb h1 h2 u (by omega)
-  have exv := ee_exists (N + N) C hrb h1 h2 v (by omega)
-  obtain ⟨hjK, hju, _⟩ := ee_spec (N + N) C u exu
-  obtain ⟨_, hjv, _⟩ := ee_spec (N + N) C v exv
-  rw [← hE] at hjv
-  apply dominate (N + N) C hrb h1 h2 {u, v} (ee (N + N) C u) hjK
-  · intro t ht
-    simp only [Finset.mem_insert, Finset.mem_singleton] at ht
-    rcases ht with rfl | rfl
-    · exact hju
-    · exact hjv
-  · intro t ht w hvw hwo hwlt
-    simp only [Finset.mem_insert, Finset.mem_singleton] at ht
-    rcases ht with rfl | rfl
-    · exact ee_single (N + N) C hrb _ hu hfu w hvw hwo hwlt
-    · exact ee_single (N + N) C hrb _ hv hfv w hvw hwo (by rw [← hE]; exact hwlt)
-  · exact inc_len N X Y
-  · exact inc_len N X' Y'
-  · exact inc_agreeV N X Y X' Y' {u, v} hX hY
-  · exact hval
-
-theorem indep_pair (N : ℕ) (C : Circuit) (hC : PEqualNP.TopForm.IsAO2 (N + N) C)
-    (h1 : N + N ≤ C.output) (h2 : C.output < N + N + C.gates.length) (u a b : ℕ)
-    (hu : u < N + N) (hfu : readsIn C (cone (N + N) C) u = 1)
-    (ha : ee (N + N) C u < ee (N + N) C a) (hb : ee (N + N) C u < ee (N + N) C b)
-    (X Y X' Y' : Finset (Fin N))
-    (hX : ∀ r : Fin N, r.val ∉ ({a, b} : Finset ℕ) → (r ∈ X ↔ r ∈ X'))
-    (hY : ∀ k : Fin N, N + k.val ∉ ({a, b} : Finset ℕ) → (k ∈ Y ↔ k ∈ Y')) :
-    val C (PEqualNP.GenericRejection.incidenceInput X Y) (N + N + ee (N + N) C u) =
-      val C (PEqualNP.GenericRejection.incidenceInput X' Y') (N + N + ee (N + N) C u) := by
-  have hrb := hC.2.1
-  have exu := ee_exists (N + N) C hrb h1 h2 u (by omega)
-  have hEP := ee_spec (N + N) C u exu
-  apply indep (N + N) C hrb {a, b} _ _ (inc_len N X Y) (inc_len N X' Y')
-    (inc_agreeV N X Y X' Y' {a, b} hX hY)
-  intro t ht
-  simp only [Finset.mem_insert, Finset.mem_singleton] at ht
-  rcases ht with rfl | rfl
-  · exact not_reach (N + N) C u t _ hEP ha
-  · exact not_reach (N + N) C u t _ hEP hb
-
-
-theorem mixed_chain (N : ℕ) (S : Fin N → Finset (Fin N)) (C : Circuit)
-    (hC : PEqualNP.TopForm.IsAO2 (N + N) C)
-    (h1 : N + N ≤ C.output) (h2 : C.output < N + N + C.gates.length)
-    (hacc : PEqualNP.GenericRejection.RightOnIncidentPairs S C)
-    (hrej : ∀ X Y : Finset (Fin N), X.card + Y.card ≤ 3 →
-      PEqualNP.GenericRejection.IsFalseInput S X Y →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) = false)
-    (p l p' l' : Fin N) (hpl : p ∈ S l) (hp'l' : p' ∈ S l')
-    (hfp : readsIn C (cone (N + N) C) p.val = 1)
-    (hfl' : readsIn C (cone (N + N) C) (N + l'.val) = 1)
-    (hE : ee (N + N) C p.val = ee (N + N) C (N + l'.val))
-    (ha : ee (N + N) C p.val < ee (N + N) C p'.val)
-    (hb : ee (N + N) C p.val < ee (N + N) C (N + l.val)) : False := by
-  apply inj_mixed N S C hC hacc hrej p l p' l' hpl hp'l' (N + N + ee (N + N) C p.val)
-  · intro X Y X' Y' hX hY hval
-    apply dom_pair N C hC h1 h2 p.val (N + l'.val) (by omega) (by omega) hfp hfl' hE X Y X' Y'
-      _ _ hval
-    · intro r hr
-      apply hX r
-      intro e; apply hr; simp [e]
-    · intro k hk
-      apply hY k
-      intro e; apply hk; simp [e]
-  · intro X X' Y Y' hX hY
-    apply indep_pair N C hC h1 h2 p.val p'.val (N + l.val) (by omega) hfp ha hb
-    · intro r hr
-      apply hX r
-      intro e; apply hr; simp [e]
-    · intro k hk
-      apply hY k
-      intro e; apply hk; simp [e]
-
-theorem pts_chain (N : ℕ) (S : Fin N → Finset (Fin N)) (C : Circuit)
-    (hC : PEqualNP.TopForm.IsAO2 (N + N) C)
-    (h1 : N + N ≤ C.output) (h2 : C.output < N + N + C.gates.length)
-    (hacc : PEqualNP.GenericRejection.RightOnIncidentPairs S C)
-    (hrej : ∀ X Y : Finset (Fin N), X.card + Y.card ≤ 3 →
-      PEqualNP.GenericRejection.IsFalseInput S X Y →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) = false)
-    (p l p' l' : Fin N) (hpl : p ∈ S l) (hp'l' : p' ∈ S l') (hp'l : p' ∉ S l)
-    (hfp : readsIn C (cone (N + N) C) p.val = 1)
-    (hfp' : readsIn C (cone (N + N) C) p'.val = 1)
-    (hE : ee (N + N) C p.val = ee (N + N) C p'.val)
-    (ha : ee (N + N) C p.val < ee (N + N) C (N + l.val))
-    (hb : ee (N + N) C p.val < ee (N + N) C (N + l'.val)) : False := by
-  apply inj_pts N S C hC hacc hrej p l p' l' hpl hp'l' hp'l (N + N + ee (N + N) C p.val)
-  · intro X Y X' hX hval
-    apply dom_pair N C hC h1 h2 p.val p'.val (by omega) (by omega) hfp hfp' hE X Y X' Y
-      _ _ hval
-    · intro r hr
-      apply hX r
-      · intro e; apply hr; simp [e]
-      · intro e; apply hr; simp [e]
-    · intro k _; exact Iff.rfl
-  · intro X Y Y' hY
-    apply indep_pair N C hC h1 h2 p.val (N + l.val) (N + l'.val) (by omega) hfp ha hb
-    · intro r _; exact Iff.rfl
-    · intro k hk
-      apply hY k
-      · intro e; apply hk; simp [e]
-      · intro e; apply hk; simp [e]
-
-theorem lns_chain (N : ℕ) (S : Fin N → Finset (Fin N)) (C : Circuit)
-    (hC : PEqualNP.TopForm.IsAO2 (N + N) C)
-    (h1 : N + N ≤ C.output) (h2 : C.output < N + N + C.gates.length)
-    (hacc : PEqualNP.GenericRejection.RightOnIncidentPairs S C)
-    (hrej : ∀ X Y : Finset (Fin N), X.card + Y.card ≤ 3 →
-      PEqualNP.GenericRejection.IsFalseInput S X Y →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) = false)
-    (p l p' l' : Fin N) (hpl : p ∈ S l) (hp'l' : p' ∈ S l') (hpl' : p ∉ S l')
-    (hfl : readsIn C (cone (N + N) C) (N + l.val) = 1)
-    (hfl' : readsIn C (cone (N + N) C) (N + l'.val) = 1)
-    (hE : ee (N + N) C (N + l.val) = ee (N + N) C (N + l'.val))
-    (ha : ee (N + N) C (N + l.val) < ee (N + N) C p.val)
-    (hb : ee (N + N) C (N + l.val) < ee (N + N) C p'.val) : False := by
-  apply inj_lns N S C hC hacc hrej p l p' l' hpl hp'l' hpl' (N + N + ee (N + N) C (N + l.val))
-  · intro X Y Y' hY hval
-    apply dom_pair N C hC h1 h2 (N + l.val) (N + l'.val) (by omega) (by omega) hfl hfl' hE
-      X Y X Y' _ _ hval
-    · intro r _; exact Iff.rfl
-    · intro k hk
-      apply hY k
-      · intro e; apply hk; simp [e]
-      · intro e; apply hk; simp [e]
-  · intro X X' Y hX
-    apply indep_pair N C hC h1 h2 (N + l.val) p.val p'.val (by omega) hfl ha hb
-    · intro r hr
-      apply hX r
-      · intro e; apply hr; simp [e]
-      · intro e; apply hr; simp [e]
-    · intro k _; exact Iff.rfl
+theorem difference {n : ℕ} (C : Circuit) (x y : Fin n → Bool) :
+    ∀ j, Live n C j → val C x j ≠ val C y j →
+      ∃ i : Fin n, x i ≠ y i ∧ Trace n C (fun a => val C x a ≠ val C y a) i.val j := by
+  intro j
+  induction j using Nat.strong_induction_on with
+  | ind j ih =>
+    intro hj hd
+    by_cases hin : j < n
+    · let i : Fin n := ⟨j,hin⟩
+      exact ⟨i, by simpa only [← val_input C x i, ← val_input C y i] using hd, .refl⟩
+    have hb : j < n+C.gates.length := by
+      by_contra! he
+      exact hd ((val_beyond C x he).trans (val_beyond C y he).symm)
+    obtain ⟨p, hp, rfl⟩ : ∃ p, p < C.gates.length ∧ j = n+p := ⟨j-n, by omega, by omega⟩
+    let g := C.gates[p]
+    have hg : C.gates[p]? = some g := List.getElem?_eq_some_iff.2 ⟨hp, rfl⟩
+    have hdiff : ∃ i ∈ g.inputs, i < n+p ∧ val C x i ≠ val C y i := by
+      by_contra! hn
+      apply hd
+      rw [val_gate C x hg, val_gate C y hg]
+      apply congrArg _
+      apply List.map_congr_left
+      intro i hi
+      by_cases hj : i < n+p
+      · simp [operand, hj, hn i hi hj]
+      · simp [operand, hj]
+    obtain ⟨a, ha, hlt, ha'⟩ := hdiff
+    have hs : Next n C a (n+p) := ⟨hlt,p,g,hg,rfl,ha⟩
+    obtain ⟨i, hi, hpath⟩ := ih a hlt (live_before hs hj) ha'
+    exact ⟨i, hi, hpath.tail ⟨ha',hs,hj⟩⟩
 
 end PEqualNP.Outside.L_meta_3376
 
-namespace PEqualNP.Outside.L_meta_3376.Asm
-open PEqualNP.CircuitLowerBounds PEqualNP.MetaComplexity.NestedCover PEqualNP.Outside.L_meta_3376
-
-theorem inj_assembly (N : ℕ) (K : Finset ℕ) (r : ℕ → ℕ) (e : ℕ → ℕ) (σ : Fin N → Fin N)
-    (top : ℕ)
-    (he : ∀ v, r v = 1 → e v ∈ K ∧ e v ≤ top ∧ (e v ≠ top → 2 ≤ r (N + N + e v)))
-    (hb : ∀ l : Fin N, r (N + l.val) = 1 → r (σ l).val = 1 → e (N + l.val) ≠ e (σ l).val)
-    (hi : ∀ l l' : Fin N, r (N + l.val) = 1 → r (σ l).val = 1 → r (N + l'.val) = 1 →
-      r (σ l').val = 1 →
-      min (e (N + l.val)) (e (σ l).val) = min (e (N + l'.val)) (e (σ l').val) → l = l') :
-    (Finset.univ.filter (fun l : Fin N => r (N + l.val) = 1 ∧ r (σ l).val = 1)).card ≤
-      (K.filter (fun j => 2 ≤ r (N + N + j))).card := by
-  apply Finset.card_le_card_of_injOn (fun l => min (e (N + l.val)) (e (σ l).val))
-  · intro l hl
-    simp only [Finset.coe_filter, Finset.mem_univ, true_and, Set.mem_ofPred_eq,
-      Finset.mem_filter] at hl ⊢
-    obtain ⟨h1, h2⟩ := hl
-    have hb' := hb l h1 h2
-    obtain ⟨a1, a2, a3⟩ := he _ h1
-    obtain ⟨b1, b2, b3⟩ := he _ h2
-    rcases le_total (e (N + l.val)) (e (σ l).val) with h | h
-    · rw [min_eq_left h]
-      exact ⟨a1, a3 (by omega)⟩
-    · rw [min_eq_right h]
-      exact ⟨b1, b3 (by omega)⟩
-  · intro l hl l' hl' heq
-    simp only [Finset.coe_filter, Finset.mem_univ, true_and, Set.mem_ofPred_eq,
-      Finset.mem_filter] at hl hl'
-    exact hi l l' hl.1 hl.2 hl'.1 hl'.2 heq
-
-
-theorem ee_range (m : ℕ) (C : Circuit) (hrb : ReadsBack m C) (h1 : m ≤ C.output)
-    (h2 : C.output < m + C.gates.length) (v : ℕ) (hv : readsIn C (cone m C) v = 1) :
-    ee m C v ∈ cone m C ∧ ee m C v ≤ C.output - m ∧
-      (ee m C v ≠ C.output - m → 2 ≤ readsIn C (cone m C) (m + ee m C v)) := by
-  have hex := ee_exists m C hrb h1 h2 v (by omega)
-  obtain ⟨hK, _, hne1⟩ := ee_spec m C v hex
-  have hle := cone_le_out m C hrb _ hK
-  refine ⟨hK, by omega, fun hne => ?_⟩
-  have := reads_pos m C _ hK (by omega)
-  omega
-
-end PEqualNP.Outside.L_meta_3376.Asm
 
 namespace PEqualNP.Outside.L_meta_3376
-open PEqualNP.CircuitLowerBounds PEqualNP.MetaComplexity.NestedCover
 
-theorem deg_le (q N : ℕ) (S : Fin N → Finset (Fin N)) (hq : 0 < q) (hN : N = q ^ 2 + q + 1)
-    (hS : ∀ l, (S l).card = q + 1)
-    (hU : ∀ p p' : Fin N, p ≠ p' → ∃! l : Fin N, p ∈ S l ∧ p' ∈ S l) (p : Fin N) :
-    (Finset.univ.filter (fun l : Fin N => p ∈ S l)).card ≤ q + 1 := by
-  classical
-  set L := Finset.univ.filter (fun l : Fin N => p ∈ S l) with hL
-  have hsub : L.biUnion (fun l => (S l).erase p) ⊆ Finset.univ.erase p := by
-    intro x hx
-    simp only [Finset.mem_biUnion, Finset.mem_erase] at hx
-    obtain ⟨_, _, hx, _⟩ := hx
-    exact Finset.mem_erase.mpr ⟨hx, Finset.mem_univ _⟩
-  have hdisj : (L : Set (Fin N)).PairwiseDisjoint (fun l => (S l).erase p) := by
-    intro i hi j hj hij
-    simp only [Finset.coe_filter, Finset.mem_univ, true_and, Set.mem_ofPred_eq, hL] at hi hj
-    rw [Function.onFun, Finset.disjoint_left]
-    intro x hxi hxj
-    rw [Finset.mem_erase] at hxi hxj
-    obtain ⟨l, _, hl⟩ := hU p x (Ne.symm hxi.1)
-    exact hij ((hl i ⟨hi, hxi.2⟩).trans (hl j ⟨hj, hxj.2⟩).symm)
-  have hcard := Finset.card_le_card hsub
-  rw [Finset.card_biUnion hdisj] at hcard
-  have hterm : ∀ l ∈ L, ((S l).erase p).card = q := by
-    intro l hl
-    simp only [hL, Finset.mem_filter, Finset.mem_univ, true_and] at hl
-    rw [Finset.card_erase_of_mem hl, hS l]
-    simp
-  rw [Finset.sum_congr rfl hterm, Finset.sum_const, smul_eq_mul, Finset.card_erase_of_mem
-    (Finset.mem_univ p), Finset.card_univ, Fintype.card_fin] at hcard
-  have h1 : N - 1 = (q + 1) * q := by
-    rw [hN, Nat.add_sub_cancel]; ring
-  rw [h1] at hcard
-  exact Nat.le_of_mul_le_mul_right hcard hq
+open PEqualNP.CircuitLowerBounds PEqualNP.MetaComplexity
+open Relation
 
-theorem hall_lines (q N : ℕ) (S : Fin N → Finset (Fin N)) (hq : 0 < q) (hN : N = q ^ 2 + q + 1)
-    (hS : ∀ l, (S l).card = q + 1)
-    (hU : ∀ p p' : Fin N, p ≠ p' → ∃! l : Fin N, p ∈ S l ∧ p' ∈ S l) :
-    ∃ σ : Fin N → Fin N, Function.Injective σ ∧ ∀ l, σ l ∈ S l := by
-  classical
-  apply (Finset.all_card_le_biUnion_card_iff_exists_injective S).mp
-  intro B
-  set U := B.biUnion S with hUdef
-  have h1 : ∑ l ∈ B, (U ∩ S l).card = B.card * (q + 1) := by
-    rw [Finset.sum_congr rfl (fun l hl => by
-      rw [Finset.inter_eq_right.mpr (Finset.subset_biUnion_of_mem S hl), hS]),
-      Finset.sum_const, smul_eq_mul]
-  have h2 : ∑ l ∈ B, (U ∩ S l).card = ∑ p ∈ U, (B.filter (fun l => p ∈ S l)).card := by
-    simp_rw [← Finset.filter_mem_eq_inter, Finset.card_eq_sum_ones, Finset.sum_filter]
-    exact Finset.sum_comm
-  have h3 : ∑ p ∈ U, (B.filter (fun l => p ∈ S l)).card ≤ U.card * (q + 1) := by
-    have := Finset.sum_le_card_nsmul U (fun p => (B.filter (fun l => p ∈ S l)).card) (q + 1)
-      (fun p _ => le_trans (Finset.card_le_card
-        (Finset.filter_subset_filter _ (Finset.subset_univ B))) (deg_le q N S hq hN hS hU p))
-    simpa [smul_eq_mul] using this
-  have h4 : B.card * (q + 1) ≤ U.card * (q + 1) := by omega
-  exact Nat.le_of_mul_le_mul_right h4 (Nat.succ_pos q)
+variable {n : ℕ} {C : Circuit}
 
-theorem count_split (N : ℕ) (σ : Fin N → Fin N) (hσ : Function.Injective σ)
-    (P Q : Fin N → Prop) [DecidablePred P] [DecidablePred Q] :
-    (Finset.univ.filter P).card + (Finset.univ.filter Q).card ≤
-      N + (Finset.univ.filter (fun l => Q l ∧ P (σ l))).card := by
-  classical
-  have hbij : Function.Bijective σ := Finite.injective_iff_bijective.mp hσ
-  have e1 : (Finset.univ.filter P).card = (Finset.univ.filter (fun l => P (σ l))).card := by
-    have : Finset.univ.filter P = (Finset.univ.filter (fun l => P (σ l))).map ⟨σ, hσ⟩ := by
-      ext p
-      simp only [Finset.mem_filter, Finset.mem_univ, true_and, Finset.mem_map,
-        Function.Embedding.coeFn_mk]
-      constructor
-      · intro hp
-        obtain ⟨l, rfl⟩ := hbij.2 p
-        exact ⟨l, hp, rfl⟩
-      · rintro ⟨l, hl, rfl⟩
-        exact hl
-    rw [this, Finset.card_map]
-  rw [e1]
-  have e2 := Finset.card_union_add_card_inter (Finset.univ.filter (fun l => P (σ l)))
-    (Finset.univ.filter Q)
-  have e3 : (Finset.univ.filter (fun l => P (σ l)) ∪ Finset.univ.filter Q).card ≤ N := by
-    calc _ ≤ (Finset.univ : Finset (Fin N)).card := Finset.card_le_univ _
-      _ = N := by simp
-  have e4 : Finset.univ.filter (fun l => P (σ l)) ∩ Finset.univ.filter Q =
-      Finset.univ.filter (fun l => Q l ∧ P (σ l)) := by
-    ext l; simp [and_comm]
-  rw [e4] at e2
-  omega
+theorem acts_mono (hC : Monotone2 C) {x y : Fin n → Bool}
+    (hxy : ∀ i, x i = true → y i = true) :
+    ∀ j, val C x j = true → val C y j = true := by
+  intro j
+  induction j using Nat.strong_induction_on with
+  | ind j ih =>
+    intro hj
+    by_cases hin : j < n
+    · let i : Fin n := ⟨j, hin⟩
+      simpa only [← val_input C x i, ← val_input C y i] using hxy i (by
+        simpa only [← val_input C x i] using hj)
+    by_cases hgt : n + C.gates.length ≤ j
+    · rw [val_beyond C x hgt] at hj
+      contradiction
+    obtain ⟨p, hp, rfl⟩ : ∃ p, p < C.gates.length ∧ j = n+p := ⟨j-n, by omega, by omega⟩
+    let g := C.gates[p]
+    have hg : C.gates[p]? = some g := List.getElem?_eq_some_iff.2 ⟨hp, rfl⟩
+    have hgate := (hC g (List.mem_of_getElem? hg)).1
+    have hm (a : ℕ) : operand C x (n+p) a = true → operand C y (n+p) a = true := by
+      by_cases ha : a < n+p
+      · simp only [operand, ite_eq_left ha]
+        exact ih a ha
+      · simp [operand, ha]
+    rw [val_gate C x hg] at hj
+    rw [val_gate C y hg]
+    simp only [Set.mem_insert_iff, Set.mem_singleton_iff] at hgate
+    rcases hgate with h | h
+    · simp only [h, GateOp.eval, List.all_map, Function.comp_apply, id, List.all_eq_true] at hj ⊢
+      exact fun a ha => hm a (hj a ha)
+    · simp only [h, GateOp.eval, List.any_map, Function.comp_apply, id, List.any_eq_true] at hj ⊢
+      obtain ⟨a, ha, he⟩ := hj
+      exact ⟨a, ha, hm a he⟩
 
+def point (s : Finset (Fin n)) (i : Fin n) : Bool := decide (i ∈ s)
 
-theorem split_range (N : ℕ) (P : ℕ → Prop) [DecidablePred P] :
-    ((Finset.range (N + N)).filter P).card =
-      (Finset.univ.filter (fun p : Fin N => P p.val)).card +
-        (Finset.univ.filter (fun l : Fin N => P (N + l.val))).card := by
-  simp only [Finset.card_filter]
-  rw [Finset.sum_range_add, Finset.sum_range (fun i => if P i then 1 else 0),
-    Finset.sum_range (fun i => if P (N + i) then 1 else 0)]
+theorem point_mono {s t : Finset (Fin n)} (h : s ⊆ t) :
+    ∀ i, point s i = true → point t i = true := by
+  intro i hi
+  simpa only [point, decide_eq_true_eq] using h (by simpa only [point, decide_eq_true_eq] using hi)
 
-theorem core_assembly (q N : ℕ) (S : Fin N → Finset (Fin N)) (hq : 0 < q)
-    (hN : N = q ^ 2 + q + 1) (hS : ∀ l, (S l).card = q + 1)
-    (hU : ∀ p p' : Fin N, p ≠ p' → ∃! l : Fin N, p ∈ S l ∧ p' ∈ S l)
-    (r : ℕ → ℕ) (D : ℕ)
-    (hinj : ∀ σ : Fin N → Fin N, Function.Injective σ → (∀ l, σ l ∈ S l) →
-      (Finset.univ.filter (fun l : Fin N => r (N + l.val) = 1 ∧ r (σ l).val = 1)).card ≤ D) :
-    ((Finset.range (N + N)).filter (fun w => r w = 1)).card ≤ N + D := by
-  classical
-  obtain ⟨σ, hσ, hσS⟩ := hall_lines q N S hq hN hS hU
-  have h1 := hinj σ hσ hσS
-  have h2 := count_split N σ hσ (fun p => r p.val = 1) (fun l => r (N + l.val) = 1)
-  rw [split_range N (fun w => r w = 1)]
-  omega
+theorem point_insert {s : Finset (Fin n)} {v u : Fin n} (h : u ≠ v) :
+    point (insert v s) u = point s u := by simp [point, h]
 
+def Carries (C : Circuit) (v : Fin n) (a : ℕ) : Prop :=
+  val C (point {v}) a ≠ val C (point (∅ : Finset (Fin n))) a
 
-theorem wires_keep (gs : List Gate) : ∀ (w : List Bool) (i : ℕ), i < w.length →
-    (gs.foldl (fun w g => w ++ [g.op.eval (g.inputs.map fun i => w.getD i false)]) w).getD i false
-      = w.getD i false := by
-  induction gs with
-  | nil => intro w i _; rfl
-  | cons g gs ih =>
-    intro w i hi
-    simp only [List.foldl_cons]
-    rw [ih _ i (by simp; omega)]
-    simp [List.getD_eq_getElem?_getD, List.getElem?_append_left hi]
+theorem carries_iff (hC : Monotone2 C) {v : Fin n} {a : ℕ} :
+    Carries C v a ↔
+      val C (point {v}) a = true ∧ val C (point (∅ : Finset (Fin n))) a = false := by
+  have hm := acts_mono hC (point_mono (Finset.empty_subset {v})) a
+  unfold Carries
+  cases ha : val C (point {v}) a <;>
+    cases hb : val C (point (∅ : Finset (Fin n))) a <;> simp_all
 
-theorem output_is_gate (N : ℕ) (S : Fin N → Finset (Fin N)) (C : Circuit)
-    (hrej : ∀ X Y : Finset (Fin N), X.card + Y.card ≤ 3 → PEqualNP.GenericRejection.IsFalseInput S X Y →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) = false) : N + N ≤ C.output := by
-  by_contra hlt
-  simp only [not_le] at hlt
-  by_cases hp : C.output < N
-  · have h := hrej {⟨C.output, hp⟩} ∅ (by simp) (by intro l hl; simp at hl)
-    have e : C.eval (PEqualNP.GenericRejection.incidenceInput ({⟨C.output, hp⟩} : Finset (Fin N)) (∅ : Finset (Fin N))) = true := by
-      unfold Circuit.eval Circuit.wires
-      rw [wires_keep _ _ _ (by simp [PEqualNP.GenericRejection.incidenceInput]; omega)]
-      simp only [PEqualNP.GenericRejection.incidenceInput, List.getD_eq_getElem?_getD]
-      rw [List.getElem?_append_left (by simp; exact hp)]
-      simp [List.getElem?_ofFn, hp]
-    rw [h] at e; exact absurd e (by simp)
-  · have hl : C.output - N < N := by omega
-    have h := hrej ∅ {⟨C.output - N, hl⟩} (by simp) (by intro l _; simp)
-    have e : C.eval (PEqualNP.GenericRejection.incidenceInput (∅ : Finset (Fin N)) ({⟨C.output - N, hl⟩} : Finset (Fin N))) = true := by
-      unfold Circuit.eval Circuit.wires
-      rw [wires_keep _ _ _ (by simp [PEqualNP.GenericRejection.incidenceInput]; omega)]
-      have hge : (List.ofFn (fun p : Fin N => decide (p ∈ (∅ : Finset (Fin N))))).length ≤ C.output := by
-        simp; omega
-      simp only [PEqualNP.GenericRejection.incidenceInput, List.getD_eq_getElem?_getD]
-      rw [List.getElem?_append_right hge]
-      have hlen : (List.ofFn (fun p : Fin N => decide (p ∈ (∅ : Finset (Fin N))))).length = N := by simp
-      rw [hlen]
-      simp [List.getElem?_ofFn, hl]
-    rw [h] at e; exact absurd e (by simp)
-
-
-theorem other_point (q N : ℕ) (S : Fin N → Finset (Fin N)) (hq : 0 < q)
-    (deg : ∀ l, (S l).card = q + 1) (l : Fin N) (p : Fin N) (hp : p ∈ S l) :
-    ∃ p' ∈ S l, p' ≠ p :=
-  Finset.exists_mem_ne (by rw [deg]; omega) p
-
-theorem other_line (q N : ℕ) (S : Fin N → Finset (Fin N)) (hq : 0 < q)
-    (hN : N = q ^ 2 + q + 1) (deg : ∀ l, (S l).card = q + 1)
-    (join : ∀ a b : Fin N, a ≠ b → ∃! l, a ∈ S l ∧ b ∈ S l) (l : Fin N) (p : Fin N)
-    (hp : p ∈ S l) : ∃ l', l' ≠ l ∧ p ∈ S l' := by
-  obtain ⟨r, hr⟩ : ∃ r, r ∉ S l := by
+theorem singleton_path {v : Fin n} {a : ℕ} (ha : Live n C a) (hd : Carries C v a) :
+    Trace n C (Carries C v) v.val a := by
+  obtain ⟨i, hi, hpath⟩ := difference C (point {v}) (point ∅) a ha hd
+  have e : i = v := by
     by_contra h
-    simp only [not_exists, not_not] at h
-    have : (Finset.univ : Finset (Fin N)) ⊆ S l := fun x _ => h x
-    have := Finset.card_le_card this
-    rw [Finset.card_univ, Fintype.card_fin, deg] at this
-    have : q + 1 < q ^ 2 + q + 1 := by nlinarith
-    omega
-  have hne : p ≠ r := fun e => hr (e ▸ hp)
-  obtain ⟨l', ⟨h1, h2⟩, _⟩ := join p r hne
-  exact ⟨l', fun e => hr (e ▸ h2), h1⟩
+    exact hi (by simp [point, h])
+  exact e ▸ hpath
 
-theorem off_line (N : ℕ) (S : Fin N → Finset (Fin N))
-    (join : ∀ a b : Fin N, a ≠ b → ∃! l, a ∈ S l ∧ b ∈ S l) (l l' p p' : Fin N)
-    (hp : p ∈ S l) (hp' : p' ∈ S l) (hne : p' ≠ p) (hl : l' ≠ l) (hpl : p ∈ S l') :
-    p' ∉ S l' := by
-  intro h
-  obtain ⟨m, _, hm⟩ := join p p' (Ne.symm hne)
-  exact hl ((hm l' ⟨hpl, h⟩).trans (hm l ⟨hp, hp'⟩).symm)
+theorem influence {v : Fin n} {P : ℕ → Prop} {b j : ℕ} {x y : Fin n → Bool}
+    (path : Trace n C P v.val b)
+    (unique : ∀ a k k', a < b → P a → LNext n C a k → LNext n C a k' → k = k')
+    (agrees : ∀ i, i ≠ v → x i = y i) (hj : Live n C j) (hd : val C x j ≠ val C y j) :
+    (j < b ∧ P j) ∨ (b ≤ j ∧ val C x b ≠ val C y b) := by
+  obtain ⟨i, hi, trace⟩ := difference C x y j hj hd
+  have e : i = v := by
+    by_contra h
+    exact hi (agrees i h)
+  subst i
+  rcases align path unique j trace with ha | hb
+  · exact Or.inl ha
+  · exact Or.inr ⟨trace_le hb, trace_start hb hd⟩
+
+noncomputable def readers (n : ℕ) (C : Circuit) (a : ℕ) : Finset ℕ :=
+  open Classical in (Finset.range (n+C.gates.length)).filter (fun b => LNext n C a b)
+
+theorem next_in_range {a b : ℕ} (h : Next n C a b) : b < n+C.gates.length := by
+  obtain ⟨_,p,g,hg,rfl,_⟩ := h
+  exact Nat.add_lt_add_left (List.getElem?_eq_some_iff.1 hg).1 n
+
+theorem mem_readers {a b : ℕ} : b ∈ readers n C a ↔ LNext n C a b := by
+  classical
+  unfold readers
+  rw [Finset.mem_filter, Finset.mem_range]
+  exact ⟨And.right, fun h => ⟨next_in_range h.1, h⟩⟩
+
+def Branch (n : ℕ) (C : Circuit) (a : ℕ) : Prop := 2 ≤ (readers n C a).card
+
+theorem nonbranch_unique {a j j' : ℕ} (h : ¬ Branch n C a)
+    (hj : LNext n C a j) (hj' : LNext n C a j') : j = j' := by
+  apply Finset.card_le_one_iff.1 (show (readers n C a).card ≤ 1 from by
+    unfold Branch at h; omega) (mem_readers.2 hj) (mem_readers.2 hj')
+
+def Eligible (C : Circuit) (v : Fin n) : Prop := ∃ b, Live n C b ∧ Carries C v b ∧ Branch n C b
+
+noncomputable def firstBranch (C : Circuit) (v : Fin n) (h : Eligible C v) : ℕ := by
+  classical exact Nat.find h
+
+theorem firstBranch_spec (v : Fin n) (h : Eligible C v) :
+    Live n C (firstBranch C v h) ∧ Carries C v (firstBranch C v h) ∧ Branch n C (firstBranch C v h) := by
+  classical exact Nat.find_spec h
+
+theorem firstBranch_unique (v : Fin n) (h : Eligible C v) :
+    ∀ a j j', a < firstBranch C v h → Carries C v a → LNext n C a j → LNext n C a j' → j = j' := by
+  classical
+  intro a j j' hl hc hj hj'
+  apply nonbranch_unique _ hj hj'
+  intro hb
+  exact (Nat.not_le_of_gt hl) (Nat.find_min' h ⟨live_before hj.1 hj.2,hc,hb⟩)
+
+theorem no_eligible_unique {v : Fin n} (h : ¬ Eligible C v) :
+    ∀ a j j', Carries C v a → LNext n C a j → LNext n C a j' → j = j' := by
+  intro a j j' hc hj hj'
+  exact nonbranch_unique (fun hb => h ⟨a,live_before hj.1 hj.2,hc,hb⟩) hj hj'
+
+end PEqualNP.Outside.L_meta_3376
 
 
-theorem ee_ep (N : ℕ) (C : Circuit) (hC : PEqualNP.TopForm.IsAO2 (N + N) C)
-    (h1 : N + N ≤ C.output) (h2 : C.output < N + N + C.gates.length) (v : ℕ)
-    (hv : 1 ≤ readsIn C (cone (N + N) C) v) : EP (N + N) C v (ee (N + N) C v) :=
-  ee_spec _ _ _ (ee_exists _ _ hC.2.1 h1 h2 v hv)
+namespace PEqualNP.Outside.L_meta_3376
 
-theorem ep_D (N : ℕ) (C : Circuit) (v j : ℕ) (hEP : EP (N + N) C v j)
-    (hj : N + N + j ≠ C.output) :
-    j ∈ (cone (N + N) C).filter (fun j => 2 ≤ readsIn C (cone (N + N) C) (N + N + j)) := by
-  obtain ⟨hK, _, hne⟩ := hEP
-  have := reads_pos (N + N) C j hK hj
-  exact Finset.mem_filter.mpr ⟨hK, by omega⟩
+open PEqualNP.CircuitLowerBounds PEqualNP.MetaComplexity
+open Relation
 
-theorem lands_in_D (q N : ℕ) (S : Fin N → Finset (Fin N)) (C : Circuit) (hq : 0 < q)
-    (hN : N = q ^ 2 + q + 1) (deg : ∀ l, (S l).card = q + 1)
-    (join : ∀ a b : Fin N, a ≠ b → ∃! l, a ∈ S l ∧ b ∈ S l)
-    (hC : PEqualNP.TopForm.IsAO2 (N + N) C) (h1 : N + N ≤ C.output)
-    (h2 : C.output < N + N + C.gates.length)
-    (hacc : PEqualNP.GenericRejection.RightOnIncidentPairs S C)
-    (hrej : ∀ X Y : Finset (Fin N), X.card + Y.card ≤ 3 → PEqualNP.GenericRejection.IsFalseInput S X Y →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) = false)
-    (p l : Fin N) (hpl : p ∈ S l)
-    (hfp : readsIn C (cone (N + N) C) p.val = 1)
-    (hfl : readsIn C (cone (N + N) C) (N + l.val) = 1) :
-    min (ee (N + N) C p.val) (ee (N + N) C (N + l.val)) ∈
-      (cone (N + N) C).filter (fun j => 2 ≤ readsIn C (cone (N + N) C) (N + N + j)) := by
-  obtain ⟨p', hp'l, hne⟩ := other_point q N S hq deg l p hpl
-  obtain ⟨l', hl'l, hpl'⟩ := other_line q N S hq hN deg join l p hpl
-  have hoff := off_line N S join l l' p p' hpl hp'l hne hl'l hpl'
-  have hneq := bstar_chain N S C hC h1 h2 hacc hrej p l p' l' hpl hp'l hpl' hoff hne hfp hfl
-  have e1 := ee_ep N C hC h1 h2 p.val (by omega)
-  have e2 := ee_ep N C hC h1 h2 (N + l.val) (by omega)
-  have le1 := cone_le_out (N + N) C hC.2.1 _ e1.1
-  have le2 := cone_le_out (N + N) C hC.2.1 _ e2.1
-  rcases le_total (ee (N + N) C p.val) (ee (N + N) C (N + l.val)) with h | h
-  · rw [min_eq_left h]
-    apply ep_D N C _ _ e1
-    have : ee (N + N) C p.val < ee (N + N) C (N + l.val) := lt_of_le_of_ne h hneq
-    omega
-  · rw [min_eq_right h]
-    apply ep_D N C _ _ e2
-    have : ee (N + N) C (N + l.val) < ee (N + N) C p.val := lt_of_le_of_ne h (Ne.symm hneq)
-    omega
+variable {n : ℕ} {C : Circuit} {G : SimpleGraph (Fin n)}
 
-theorem hi_cases (q N : ℕ) (S : Fin N → Finset (Fin N)) (C : Circuit)
-    (join : ∀ a b : Fin N, a ≠ b → ∃! l, a ∈ S l ∧ b ∈ S l)
-    (hC : PEqualNP.TopForm.IsAO2 (N + N) C) (h1 : N + N ≤ C.output)
-    (h2 : C.output < N + N + C.gates.length)
-    (hacc : PEqualNP.GenericRejection.RightOnIncidentPairs S C)
-    (hrej : ∀ X Y : Finset (Fin N), X.card + Y.card ≤ 3 → PEqualNP.GenericRejection.IsFalseInput S X Y →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) = false)
-    (σ : Fin N → Fin N) (hσ : Function.Injective σ) (hσS : ∀ l, σ l ∈ S l)
-    (hb : ∀ l : Fin N, readsIn C (cone (N + N) C) (N + l.val) = 1 →
-      readsIn C (cone (N + N) C) (σ l).val = 1 →
-      ee (N + N) C (N + l.val) ≠ ee (N + N) C (σ l).val)
-    (l l' : Fin N) (hfl : readsIn C (cone (N + N) C) (N + l.val) = 1)
-    (hfp : readsIn C (cone (N + N) C) (σ l).val = 1)
-    (hfl' : readsIn C (cone (N + N) C) (N + l'.val) = 1)
-    (hfp' : readsIn C (cone (N + N) C) (σ l').val = 1)
-    (hmin : min (ee (N + N) C (N + l.val)) (ee (N + N) C (σ l).val) =
-      min (ee (N + N) C (N + l'.val)) (ee (N + N) C (σ l').val)) : l = l' := by
+/-- Right on the SLICE of at most three elements: on every set of at most three inputs the
+output is true exactly when the set holds both ends of an edge. -/
+def GraphEval (C : Circuit) (G : SimpleGraph (Fin n)) : Prop :=
+  ∀ S : Finset (Fin n), S.card ≤ 3 →
+    (val C (point S) C.output = true ↔ ∃ u ∈ S, ∃ v ∈ S, G.Adj u v)
+
+theorem edge_of_point (he : GraphEval C G) {S : Finset (Fin n)} (hS : S.card ≤ 3) :
+    val C (point S) C.output = true ↔ ∃ u ∈ S, ∃ v ∈ S, G.Adj u v :=
+  he S hS
+
+theorem point_pair (he : GraphEval C G) (v w : Fin n) :
+    val C (point {v,w}) C.output = true ↔ G.Adj v w := by
+  rw [edge_of_point he (Finset.card_le_two.trans (by norm_num))]
+  constructor
+  · rintro ⟨a,ha,b,hb,hab⟩
+    simp only [Finset.mem_insert,Finset.mem_singleton] at ha hb
+    rcases ha with rfl | rfl <;> rcases hb with rfl | rfl
+    · exact (G.irrefl hab).elim
+    · exact hab
+    · exact G.adj_symm hab
+    · exact (G.irrefl hab).elim
+  · intro h
+    exact ⟨v, by simp, w, by simp, h⟩
+
+theorem point_pair_quiet (he : GraphEval C G) {v w : Fin n} (hn : ¬ G.Adj v w) :
+    val C (point {v,w}) C.output = false := by
+  rw [← Bool.not_eq_true, point_pair he]
+  exact hn
+
+theorem point_single_quiet (he : GraphEval C G) (v : Fin n) :
+    val C (point {v}) C.output = false := by
+  simpa using point_pair_quiet he (G.irrefl (v := v))
+
+theorem edge_at_output (he : GraphEval C G) {v w : Fin n} (hvw : G.Adj v w) :
+    n ≤ C.output ∧ C.output < n+C.gates.length := by
+  have hp := (point_pair he v w).2 hvw
+  constructor
+  · by_contra! hl
+    let i : Fin n := ⟨C.output,hl⟩
+    have hv := point_single_quiet he i
+    rw [show C.output = i.val from rfl,val_input] at hv
+    simp [point] at hv
+  · by_contra! hgt
+    rw [val_beyond C _ hgt] at hp
+    contradiction
+
+theorem two_inputs {l : List ℕ} {a b : ℕ} (ha : a ∈ l) (hb : b ∈ l) (hne : a ≠ b)
+    (hl : l.length ≤ 2) :
+    ∀ i ∈ l, i = a ∨ i = b := by
+  have hsub : ({a,b} : Finset ℕ) ⊆ l.toFinset := by
+    intro x hx
+    simp only [Finset.mem_insert,Finset.mem_singleton] at hx
+    rcases hx with rfl | rfl
+    · exact List.mem_toFinset.mpr ha
+    · exact List.mem_toFinset.mpr hb
+  have hcard : l.toFinset.card ≤ ({a,b} : Finset ℕ).card := by
+    simpa [hne] using l.toFinset_card_le.trans hl
+  have hEq := Finset.eq_of_subset_of_card_le hsub hcard
+  intro i hi
+  have hm : i ∈ ({a,b} : Finset ℕ) := hEq.symm ▸ (List.mem_toFinset.mpr hi)
+  simpa using hm
+
+theorem carries_separate (hC : Monotone2 C) {v w : Fin n} {a : ℕ}
+    (h1 : val C (point {v}) a = true) (h0 : val C (point {w}) a = false) :
+    Carries C v a ∧ ¬ Carries C w a := by
+  have hb : val C (point (∅ : Finset (Fin n))) a = false := by
+    rw [← Bool.not_eq_true]
+    intro hc
+    have hh := acts_mono hC (point_mono (Finset.empty_subset {w})) a hc
+    rw [h0] at hh
+    contradiction
+  rw [carries_iff hC,carries_iff hC]
+  simp [h1,h0,hb]
+
+theorem meeting_gate (hC : Monotone2 C) (he : GraphEval C G) {v w : Fin n}
+    (hvw : G.Adj v w) :
+    ∃ p g a b, C.gates[p]? = some g ∧ g.op = GateOp.and ∧ Live n C (n+p) ∧
+      LNext n C a (n+p) ∧ LNext n C b (n+p) ∧
+      Carries C v a ∧ ¬ Carries C w a ∧ Carries C w b ∧ ¬ Carries C v b ∧
+      (∀ i ∈ g.inputs, i = a ∨ i = b) := by
+  classical
+  let P (i : ℕ) := Live n C i ∧ val C (point {v,w}) i = true ∧
+    val C (point {v}) i = false ∧ val C (point {w}) i = false
+  have hex : ∃ i, P i :=
+    ⟨C.output, .refl, (point_pair he v w).2 hvw, point_single_quiet he v, point_single_quiet he w⟩
+  let j := Nat.find hex
+  have hj : P j := Nat.find_spec hex
+  have earlier (i : ℕ) (hlt : i < j) (hl : Live n C i)
+      (htrue : val C (point {v,w}) i = true) :
+      val C (point {v}) i = true ∨ val C (point {w}) i = true := by
+    by_contra! h
+    have h' : P i := ⟨hl, htrue, by simpa using h.1, by simpa using h.2⟩
+    exact (Nat.not_le_of_gt hlt) (Nat.find_min' hex h')
+  have hge : n ≤ j := by
+    by_contra! hh
+    let i : Fin n := ⟨j,hh⟩
+    obtain ⟨_,ht,hv,hw⟩ := hj
+    rw [show j = i.val from rfl,val_input] at ht hv hw
+    simp only [point,decide_eq_true_eq,Finset.mem_insert,Finset.mem_singleton] at ht
+    rcases ht with h | h
+    · simp [point,h] at hv
+    · simp [point,h] at hw
+  have hlt : j < n+C.gates.length := by
+    by_contra! hh
+    have ht := hj.2.1
+    rw [val_beyond C _ hh] at ht
+    contradiction
+  let p := j-n
+  have hp : p < C.gates.length := by dsimp [p]; omega
+  have ep : n+p = j := by dsimp [p]; omega
+  let g := C.gates[p]
+  have hg : C.gates[p]? = some g := List.getElem?_eq_some_iff.2 ⟨hp,rfl⟩
+  have hl := hC g (List.mem_of_getElem? hg)
+  have hh : Live n C (n+p) := ep ▸ hj.1
+  have hs1 : val C (point {v,w}) (n+p) = true := ep ▸ hj.2.1
+  have hs2 : val C (point {v}) (n+p) = false := ep ▸ hj.2.2.1
+  have hs3 : val C (point {w}) (n+p) = false := ep ▸ hj.2.2.2
+  have reads (i : ℕ) (hi : i < n+p) (hm : i ∈ g.inputs) : LNext n C i (n+p) :=
+    ⟨⟨hi,p,g,hg,rfl,hm⟩,hh⟩
+  have hAnd : g.op = GateOp.and := by
+    rcases hl.1 with h | h
+    · exact h
+    have hop : g.op = GateOp.or := h
+    simp only [val_gate C _ hg, hop, GateOp.eval, List.any_map, Function.comp_apply, id,
+      List.any_eq_true] at hs1
+    obtain ⟨i,hi,ht⟩ := hs1
+    have hi' : i < n+p := by
+      by_contra hh'
+      simp [operand,hh'] at ht
+    have ht' : val C (point {v,w}) i = true := by simpa [operand,hi'] using ht
+    rcases earlier i (ep ▸ hi') (live_before (reads i hi' hi).1 hh) ht' with hV | hW
+    · have hs := hs2
+      rw [← Bool.not_eq_true, val_gate C _ hg,hop,GateOp.eval,List.any_map,List.any_eq_true] at hs
+      exact (hs ⟨i,hi,by simpa [operand,hi'] using hV⟩).elim
+    · have hs := hs3
+      rw [← Bool.not_eq_true, val_gate C _ hg,hop,GateOp.eval,List.any_map,List.any_eq_true] at hs
+      exact (hs ⟨i,hi,by simpa [operand,hi'] using hW⟩).elim
+  have hAll : ∀ i ∈ g.inputs, operand C (point {v,w}) (n+p) i = true := by
+    simpa [val_gate C _ hg,hAnd,GateOp.eval,List.all_eq_true] using hs1
+  have hFalse (x : Fin n → Bool) (hX : val C x (n+p) = false) :
+      ∃ i ∈ g.inputs, operand C x (n+p) i = false := by
+    by_contra! h
+    have ht : val C x (n+p) = true := by
+      rw [val_gate C _ hg,hAnd,GateOp.eval,List.all_map,List.all_eq_true]
+      intro i hi
+      simpa using h i hi
+    rw [hX] at ht
+    contradiction
+  obtain ⟨a,ha,hwa⟩ := hFalse _ hs3
+  obtain ⟨b,hb,hvb⟩ := hFalse _ hs2
+  have before (i : ℕ) (h : i ∈ g.inputs) : i < n+p := by
+    by_contra hi
+    have hX := hAll i h
+    simp [operand,hi] at hX
+  have ha' := before a ha
+  have hb' := before b hb
+  rw [operand,ite_eq_left ha'] at hwa
+  rw [operand,ite_eq_left hb'] at hvb
+  have near (i : ℕ) (h : i ∈ g.inputs) :
+      val C (point {v}) i = true ∨ val C (point {w}) i = true := by
+    have hi := before i h
+    apply earlier i (ep ▸ hi) (live_before (reads i hi h).1 hh)
+    simpa [operand,hi] using hAll i h
+  have hva := (near a ha).resolve_right (by rw [hwa]; decide)
+  have hwb := (near b hb).resolve_left (by rw [hvb]; decide)
+  have hne : a ≠ b := fun e => Bool.noConfusion (hva.symm.trans (e ▸ hvb))
+  exact ⟨p,g,a,b,hg,hAnd,hh,reads a ha' ha,reads b hb' hb,
+    (carries_separate hC hva hwa).1,(carries_separate hC hva hwa).2,
+    (carries_separate hC hwb hvb).1,(carries_separate hC hwb hvb).2,
+    two_inputs ha hb hne hl.2⟩
+
+theorem covers_edge (hC : Monotone2 C) (he : GraphEval C G) {v w a₀ b₀ : Fin n}
+    (hvw : G.Adj v w) (ha₀ : G.Adj v a₀) (_ha₁ : a₀ ≠ w)
+    (hb₀ : G.Adj w b₀) (_hb₁ : b₀ ≠ v) (hind : a₀ = b₀ ∨ ¬ G.Adj a₀ b₀) :
+    Eligible C v ∨ Eligible C w := by
+  by_contra! bad
+  obtain ⟨p,g,a,b,hg,hAnd,hj,ha,hb,hva,hwa,hwb,hvb,hs⟩ := meeting_gate hC he hvw
+  have pathV : Trace n C (Carries C v) v.val (n+p) :=
+    (singleton_path (live_before ha.1 ha.2) hva).tail ⟨hva,ha⟩
+  have pathW : Trace n C (Carries C w) w.val (n+p) :=
+    (singleton_path (live_before hb.1 hb.2) hwb).tail ⟨hwb,hb⟩
+  have uniqueV : ∀ k j j', k < n+p → Carries C v k → LNext n C k j → LNext n C k j' → j=j' :=
+    fun k j j' _ => no_eligible_unique bad.1 k j j'
+  have uniqueW : ∀ k j j', k < n+p → Carries C w k → LNext n C k j → LNext n C k j' → j=j' :=
+    fun k j j' _ => no_eligible_unique bad.2 k j j'
+  let S : Finset (Fin n) := {a₀,b₀}
+  let x := point S
+  let y := point (insert v S)
+  let z := point (insert w S)
+  have hzero : val C x C.output = false :=
+    point_pair_quiet he (hind.elim (fun e => e ▸ G.irrefl (v := a₀)) id)
+  have hY : val C y C.output = true := (edge_of_point he Finset.card_le_three).2 ⟨v,by simp,a₀,by simp [S],ha₀⟩
+  have hZ : val C z C.output = true := (edge_of_point he Finset.card_le_three).2 ⟨w,by simp,b₀,by simp [S],hb₀⟩
+  have jout := next_le hj
+  have hvj := influence pathV uniqueV (fun _ hi => (point_insert hi).symm) ReflTransGen.refl (show val C x C.output ≠ val C y C.output from by rw [hzero,hY]; decide)
+  have hwj := influence pathW uniqueW (fun _ hi => (point_insert hi).symm) ReflTransGen.refl (show val C x C.output ≠ val C z C.output from by rw [hzero,hZ]; decide)
+  have hdiffV := (hvj.resolve_left (fun h => (Nat.not_lt_of_ge jout) h.1)).2
+  have hdiffW := (hwj.resolve_left (fun h => (Nat.not_lt_of_ge jout) h.1)).2
+  have hX : val C x (n+p) = false := by
+    rw [← Bool.not_eq_true]
+    intro htrue
+    exact hdiffV (htrue.trans (acts_mono hC (point_mono (Finset.subset_insert _ _)) _ htrue).symm)
+  have hyj : val C y (n+p) = true := by
+    rw [hX] at hdiffV
+    simpa using hdiffV.symm
+  have hzj : val C z (n+p) = true := by
+    rw [hX] at hdiffW
+    simpa using hdiffW.symm
+  have hAX : val C x a = val C z a := by
+    by_contra h
+    rcases influence pathW uniqueW (fun _ hi => (point_insert hi).symm) (live_before ha.1 ha.2) h with h' | h'
+    · exact hwa h'.2
+    · exact (Nat.not_le_of_gt ha.1.1) h'.1
+  have hBX : val C x b = val C y b := by
+    by_contra h
+    rcases influence pathV uniqueV (fun _ hi => (point_insert hi).symm) (live_before hb.1 hb.2) h with h' | h'
+    · exact hvb h'.2
+    · exact (Nat.not_le_of_gt hb.1.1) h'.1
+  have hYall : ∀ i ∈ g.inputs, operand C y (n+p) i = true := by
+    simpa [val_gate C _ hg,hAnd,GateOp.eval,List.all_eq_true] using hyj
+  have hZall : ∀ i ∈ g.inputs, operand C z (n+p) i = true := by
+    simpa [val_gate C _ hg,hAnd,GateOp.eval,List.all_eq_true] using hzj
+  have hin (i : ℕ) : LNext n C i (n+p) → i ∈ g.inputs := by
+    rintro ⟨⟨_,k,g',he',hk,hmem⟩,_⟩
+    have e : k=p := by omega
+    subst k
+    rw [hg] at he'
+    cases he'
+    exact hmem
+  have hxA := hZall a (hin a ha)
+  have hxB := hYall b (hin b hb)
+  rw [operand,ite_eq_left ha.1.1,← hAX] at hxA
+  rw [operand,ite_eq_left hb.1.1,← hBX] at hxB
+  have hs' : val C x (n+p) = true := by
+    rw [val_gate C _ hg,hAnd,GateOp.eval,List.all_map,List.all_eq_true]
+    intro i hi
+    rcases hs i hi with rfl | rfl
+    · simpa [Function.comp_apply,operand,ha.1.1] using hxA
+    · simpa [Function.comp_apply,operand,hb.1.1] using hxB
+  rw [hX] at hs'
+  contradiction
+
+end PEqualNP.Outside.L_meta_3376
+
+
+namespace PEqualNP.Outside.L_meta_3376
+
+open PEqualNP.CircuitLowerBounds PEqualNP.MetaComplexity
+open Relation
+
+variable {n : ℕ} {C : Circuit} {G : SimpleGraph (Fin n)}
+
+theorem value_at_branch {v : Fin n} {x y : Fin n → Bool} (hv : Eligible C v)
+    (agrees : ∀ i, i ≠ v → x i = y i)
+    (hb : val C x (firstBranch C v hv) = val C y (firstBranch C v hv)) :
+    val C x C.output = val C y C.output := by
+  by_contra h
+  have spec := firstBranch_spec v hv
+  have path := singleton_path spec.1 spec.2.1
+  rcases influence path (firstBranch_unique v hv) agrees ReflTransGen.refl h with bad | bad
+  · exact (Nat.not_lt_of_ge (next_le spec.1)) bad.1
+  · exact bad.2 hb
+
+theorem branch_injective (hC : Monotone2 C) (he : GraphEval C G)
+    (htwins : ∀ v w : Fin n, v ≠ w → ¬ G.Adj v w → 2 ≤ (G.neighborSet v).ncard →
+      2 ≤ (G.neighborSet w).ncard → ∃ u : Fin n, ¬ (G.Adj v u ↔ G.Adj w u))
+    {v w : Fin n} (hv : Eligible C v) (hw : Eligible C w)
+    (hdv : 2 ≤ (G.neighborSet v).ncard) (hdw : 2 ≤ (G.neighborSet w).ncard)
+    (h : firstBranch C v hv = firstBranch C w hw) : v = w := by
+  classical
   by_contra hne
-  have hpp : σ l ≠ σ l' := fun e => hne (hσ e)
-  have hnotboth : ¬ (σ l' ∈ S l ∧ σ l ∈ S l') := by
-    rintro ⟨h3, h4⟩
-    obtain ⟨m0, _, hm⟩ := join (σ l) (σ l') hpp
-    exact hne ((hm l ⟨hσS l, h3⟩).trans (hm l' ⟨h4, hσS l'⟩).symm)
-  have hb1 := hb l hfl hfp
-  have hb2 := hb l' hfl' hfp'
-  rcases lt_or_gt_of_ne hb1 with c1 | c1 <;> rcases lt_or_gt_of_ne hb2 with c2 | c2
-  · rw [min_eq_left (le_of_lt c1), min_eq_left (le_of_lt c2)] at hmin
-    by_cases hx : σ l ∈ S l'
-    · have hy : σ l' ∉ S l := fun h => hnotboth ⟨h, hx⟩
-      exact lns_chain N S C hC h1 h2 hacc hrej (σ l') l' (σ l) l (hσS l') (hσS l) hy hfl' hfl
-        hmin.symm (by omega) (by omega)
-    · exact lns_chain N S C hC h1 h2 hacc hrej (σ l) l (σ l') l' (hσS l) (hσS l') hx hfl hfl'
-        hmin (by omega) (by omega)
-  · rw [min_eq_left (le_of_lt c1), min_eq_right (le_of_lt c2)] at hmin
-    exact mixed_chain N S C hC h1 h2 hacc hrej (σ l') l' (σ l) l (hσS l') (hσS l) hfp' hfl
-      hmin.symm (by omega) (by omega)
-  · rw [min_eq_right (le_of_lt c1), min_eq_left (le_of_lt c2)] at hmin
-    exact mixed_chain N S C hC h1 h2 hacc hrej (σ l) l (σ l') l' (hσS l) (hσS l') hfp hfl'
-      hmin (by omega) (by omega)
-  · rw [min_eq_right (le_of_lt c1), min_eq_right (le_of_lt c2)] at hmin
-    by_cases hx : σ l' ∈ S l
-    · have hy : σ l ∉ S l' := fun h => hnotboth ⟨hx, h⟩
-      exact pts_chain N S C hC h1 h2 hacc hrej (σ l') l' (σ l) l (hσS l') (hσS l) hy hfp' hfp
-        hmin.symm (by omega) (by omega)
-    · exact pts_chain N S C hC h1 h2 hacc hrej (σ l) l (σ l') l' (hσS l) (hσS l') hx hfp hfp'
-        hmin (by omega) (by omega)
+  let b := firstBranch C v hv
+  have hw_b : firstBranch C w hw = b := h.symm
+  have hvtrue : val C (point {v}) b = true :=
+    (carries_iff hC).1 (firstBranch_spec v hv).2.1 |>.1
+  have hwtrue : val C (point {w}) b = true := by
+    rw [← hw_b]
+    exact (carries_iff hC).1 (firstBranch_spec w hw).2.1 |>.1
+  by_cases hadj : G.Adj v w
+  · have hbig : val C (point (insert w ({v} : Finset (Fin n)))) b = true :=
+      acts_mono hC (point_mono (Finset.subset_insert _ _)) b hvtrue
+    have eq := value_at_branch hw
+      (x := point {v}) (y := point (insert w ({v} : Finset (Fin n))))
+      (fun _ hi => (point_insert hi).symm) (by rw [hw_b,hvtrue,hbig])
+    have hy : val C (point (insert w ({v} : Finset (Fin n)))) C.output = true :=
+      (point_pair he w v).2 (G.adj_symm hadj)
+    rw [point_single_quiet he v,hy] at eq
+    contradiction
+  obtain ⟨u,hu⟩ := htwins v w hne hadj hdv hdw
+  have hx : val C (point {v,u}) b = true := acts_mono hC
+    (point_mono (by simp)) b hvtrue
+  have hy : val C (point {w,u}) b = true := acts_mono hC
+    (point_mono (by simp)) b hwtrue
+  have hxyz : val C (point (insert w ({v,u} : Finset (Fin n)))) b = true :=
+    acts_mono hC (point_mono (Finset.subset_insert _ _)) b hx
+  have hEq : (insert w ({v,u} : Finset (Fin n))) = insert v {w,u} :=
+    Finset.insert_comm _ _ _
+  have e1 := value_at_branch hw
+    (x := point {v,u}) (y := point (insert w ({v,u} : Finset (Fin n))))
+    (fun _ hi => (point_insert hi).symm) (by rw [hw_b,hx,hxyz])
+  have e2 := value_at_branch hv
+    (x := point {w,u}) (y := point (insert v ({w,u} : Finset (Fin n))))
+    (fun _ hi => (point_insert hi).symm) (by rw [← hEq]; exact hy.trans hxyz.symm)
+  have e : val C (point {v,u}) C.output = val C (point {w,u}) C.output :=
+    e1.trans (by rw [hEq,e2])
+  apply hu
+  rw [← point_pair he v u, ← point_pair he w u, e]
 
-theorem hinj_open (q N : ℕ) (S : Fin N → Finset (Fin N)) (C : Circuit) (hq : 0 < q)
-    (hN : N = q ^ 2 + q + 1) (deg : ∀ l, (S l).card = q + 1)
-    (join : ∀ a b : Fin N, a ≠ b → ∃! l, a ∈ S l ∧ b ∈ S l)
-    (hC : PEqualNP.TopForm.IsAO2 (N + N) C) (h1 : N + N ≤ C.output)
-    (h2 : C.output < N + N + C.gates.length)
-    (hacc : PEqualNP.GenericRejection.RightOnIncidentPairs S C)
-    (hrej : ∀ X Y : Finset (Fin N), X.card + Y.card ≤ 3 → PEqualNP.GenericRejection.IsFalseInput S X Y →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) = false)
-    (σ : Fin N → Fin N) (hσ : Function.Injective σ) (hσS : ∀ l, σ l ∈ S l) :
-    (Finset.univ.filter (fun l : Fin N => readsIn C (cone (N + N) C) (N + l.val) = 1 ∧
-      readsIn C (cone (N + N) C) (σ l).val = 1)).card ≤
-      ((cone (N + N) C).filter (fun j => 2 ≤ readsIn C (cone (N + N) C) (N + N + j))).card := by
+noncomputable def living (n : ℕ) (C : Circuit) : Finset ℕ :=
+  open Classical in (Finset.range (n+C.gates.length)).filter (Live n C)
+
+theorem mem_living {w : ℕ} : w ∈ living n C ↔ w < n+C.gates.length ∧ Live n C w := by
   classical
-  have hb : ∀ l : Fin N, readsIn C (cone (N + N) C) (N + l.val) = 1 →
-      readsIn C (cone (N + N) C) (σ l).val = 1 →
-      ee (N + N) C (N + l.val) ≠ ee (N + N) C (σ l).val := by
-    intro l hfl hfp
-    obtain ⟨p', hp'l, hne⟩ := other_point q N S hq deg l (σ l) (hσS l)
-    obtain ⟨l', hl'l, hpl'⟩ := other_line q N S hq hN deg join l (σ l) (hσS l)
-    have hoff := off_line N S join l l' (σ l) p' (hσS l) hp'l hne hl'l hpl'
-    exact (bstar_chain N S C hC h1 h2 hacc hrej (σ l) l p' l' (hσS l) hp'l hpl' hoff hne hfp hfl).symm
-  exact Asm.inj_assembly N (cone (N + N) C) (fun w => readsIn C (cone (N + N) C) w) (ee (N + N) C) σ
-    (C.output - (N + N)) (fun v hv => Asm.ee_range (N + N) C hC.2.1 h1 h2 v hv) hb
-    (fun l l' a b c e f => hi_cases q N S C join hC h1 h2 hacc hrej σ hσ hσS hb l l' a b c e f)
+  simp [living]
 
-theorem core (q N : ℕ) (S : Fin N → Finset (Fin N)) (C : Circuit) (hq : 0 < q)
-    (hN : N = q ^ 2 + q + 1) (deg : ∀ l, (S l).card = q + 1)
-    (join : ∀ a b : Fin N, a ≠ b → ∃! l, a ∈ S l ∧ b ∈ S l)
-    (hC : PEqualNP.TopForm.IsAO2 (N + N) C) (h1 : N + N ≤ C.output)
-    (h2 : C.output < N + N + C.gates.length)
-    (hacc : PEqualNP.GenericRejection.RightOnIncidentPairs S C)
-    (hrej : ∀ X Y : Finset (Fin N), X.card + Y.card ≤ 3 → PEqualNP.GenericRejection.IsFalseInput S X Y →
-      C.eval (PEqualNP.GenericRejection.incidenceInput X Y) = false) :
-    ((Finset.range (N + N)).filter (fun w => readsIn C (cone (N + N) C) w = 1)).card ≤
-      N + ((cone (N + N) C).filter (fun j => 2 ≤ readsIn C (cone (N + N) C) (N + N + j))).card := by
+theorem input_live (he : GraphEval C G) {v u : Fin n} (hvu : G.Adj v u) :
+    Live n C v.val := by
+  have hx : val C (point {u}) C.output = false := point_single_quiet he u
+  have hy : val C (point {v,u}) C.output = true := (point_pair he v u).2 hvu
+  obtain ⟨i,hi,trace⟩ := difference C (point {u}) (point {v,u}) C.output ReflTransGen.refl
+    (by rw [hx,hy]; decide)
+  have ei : i=v := by
+    by_contra h
+    exact hi ((point_insert h).symm)
+  subst i
+  rcases trace.cases_head with h | ⟨b,hb,_⟩
+  · rw [h]
+    exact .refl
+  · exact live_before hb.2.1 hb.2.2
+
+theorem live_readers_nonempty {a : ℕ} (ha : Live n C a) (hneq : a ≠ C.output) :
+    (readers n C a).Nonempty := by
+  rcases ha.cases_head with h | ⟨b,hb,hpath⟩
+  · exact (hneq h).elim
+  · exact ⟨b,mem_readers.2 ⟨hb,hpath⟩⟩
+
+theorem readers_filter (a : ℕ) :
+    open Classical in readers n C a = (living n C).filter (fun b => LNext n C a b) := by
   classical
-  apply core_assembly q N S hq hN deg join (fun w => readsIn C (cone (N + N) C) w)
-  intro σ hσ hσS
-  exact hinj_open q N S C hq hN deg join hC h1 h2 hacc hrej σ hσ hσS
+  ext b
+  simp only [mem_readers,Finset.mem_filter,mem_living]
+  exact ⟨fun h => ⟨⟨next_in_range h.1,h.2⟩,h⟩, And.right⟩
 
-theorem glue (N : ℕ) (C : Circuit) (hC : PEqualNP.TopForm.IsAO2 (N + N) C)
-    (h1 : N + N ≤ C.output) (h2 : C.output < N + N + C.gates.length)
-    (hread : ∀ i < N + N, 1 ≤ readsIn C (cone (N + N) C) i)
-    (hcore : ((Finset.range (N + N)).filter (fun w => readsIn C (cone (N + N) C) w = 1)).card ≤
-      N + ((cone (N + N) C).filter (fun j => 2 ≤ readsIn C (cone (N + N) C) (N + N + j))).card) :
-    N + N + N ≤ C.size + 1 := by
-  have hid := cone_identity (N + N) C hC h1 h2
-  set K := cone (N + N) C with hK
-  have hKsz : K.card ≤ C.size := by
-    have : K ⊆ Finset.range C.gates.length := by
-      intro k hk; exact Finset.mem_range.mpr ((mem_cone _ C k).mp hk).1
-    have := Finset.card_le_card this
-    rw [Finset.card_range] at this
-    exact this
-  have hA : 2 * (N + N) ≤ ∑ w ∈ Finset.range (N + N), readsIn C K w +
-      ((Finset.range (N + N)).filter (fun w => readsIn C K w = 1)).card := by
-    rw [Finset.card_filter, ← Finset.sum_add_distrib]
-    calc 2 * (N + N) = ∑ w ∈ Finset.range (N + N), 2 := by simp; ring
-      _ ≤ _ := by
-        apply Finset.sum_le_sum
-        intro w hw
-        have := hread w (Finset.mem_range.mp hw)
-        split_ifs with h <;> omega
-  have hD : ((K.filter (fun j => 2 ≤ readsIn C K (N + N + j)))).card ≤
-      ∑ j ∈ K, (readsIn C K (N + N + j) - 1) := by
-    rw [Finset.card_filter]
+theorem incoming_bound {j : ℕ} (hC : Monotone2 C) (hj : j ∈ living n C) :
+    open Classical in ((living n C).filter fun i => LNext n C i j).card ≤ if j<n then 0 else 2 := by
+  classical
+  by_cases hi : j < n
+  · rw [ite_eq_left hi]
+    apply Nat.le_of_eq
+    rw [Finset.card_eq_zero]
+    apply Finset.eq_empty_iff_forall_notMem.2
+    intro i hm
+    obtain ⟨_,⟨_,p,g,hg,hp,_⟩,_⟩ := Finset.mem_filter.mp hm
+    omega
+  rw [ite_eq_right hi]
+  have hj' := (mem_living.1 hj).1
+  let p := j-n
+  have hp : p < C.gates.length := by dsimp [p]; omega
+  have he : j=n+p := by dsimp [p]; omega
+  let g := C.gates[p]
+  have hg : C.gates[p]? = some g := List.getElem?_eq_some_iff.2 ⟨hp,rfl⟩
+  have hsub : ((living n C).filter fun i => LNext n C i j) ⊆ g.inputs.toFinset := by
+    intro a ha
+    obtain ⟨_,⟨_,q,g',hg',hq,hm⟩,_⟩ := Finset.mem_filter.1 ha
+    have ep : p=q := by omega
+    subst q
+    rw [hg] at hg'
+    cases hg'
+    exact List.mem_toFinset.2 hm
+  exact (Finset.card_le_card hsub).trans (g.inputs.toFinset_card_le.trans
+    (hC g (List.mem_of_getElem? hg)).2)
+
+theorem branch_budget (hC : Monotone2 C) (he : GraphEval C G)
+    (hdegree : ∀ v : Fin n, ∃ u, G.Adj v u) (ho : C.output ∈ living n C) :
+    open Classical in n + ((living n C).filter (Branch n C)).card ≤ C.size + 1 := by
+  classical
+  let W := living n C
+  let S := W.filter (fun a => ¬ a < n)
+  let B := W.filter (Branch n C)
+  let R := W.erase C.output
+  have hSub : Finset.range n ⊆ W := by
+    intro a ha
+    have hi := Finset.mem_range.1 ha
+    let v : Fin n := ⟨a,hi⟩
+    obtain ⟨u,hu⟩ := hdegree v
+    exact mem_living.2 ⟨by omega,input_live he hu⟩
+  have hW : W.card = n + S.card := by
+    have h := Finset.card_sdiff_add_card_eq_card hSub
+    have e : W \ Finset.range n = S := by ext a; simp [S]
+    rw [e,Finset.card_range] at h
+    omega
+  have hR : R.card + 1 = W.card := by
+    dsimp [R]
+    have h := Finset.card_erase_add_one ho
+    exact h
+  have hS : S.card ≤ C.gates.length := by
+    rw [show C.gates.length = (Finset.range C.gates.length).card by simp]
+    apply Finset.card_le_card_of_injOn (fun a => a-n)
+    · intro a ha
+      have h : a < n+C.gates.length := (mem_living.1 (Finset.mem_filter.1 ha).1).1
+      have h0 : n ≤ a := Nat.le_of_not_gt (Finset.mem_filter.1 ha).2
+      apply Finset.mem_range.2
+      change a-n < C.gates.length
+      omega
+    · intro a ha b hb hab
+      have h1 : n ≤ a := Nat.le_of_not_gt (Finset.mem_filter.1 ha).2
+      have h2 : n ≤ b := Nat.le_of_not_gt (Finset.mem_filter.1 hb).2
+      change a-n=b-n at hab
+      omega
+  have hoNone : ¬ Branch n C C.output := by
+    intro h
+    have hgt : 0 < (readers n C C.output).card := by unfold Branch at h; omega
+    obtain ⟨b,hb⟩ := Finset.card_pos.1 hgt
+    have hs := mem_readers.1 hb
+    exact (Nat.not_lt_of_ge (next_le hs.2)) hs.1.1
+  have hlow : R.card+B.card ≤ ∑ a ∈ W, (readers n C a).card := by
+    have eR : (∑ a ∈ W, (if a=C.output then 0 else 1 : ℕ)) = R.card := by
+      calc
+        _ = ∑ a ∈ W, (if a≠C.output then 1 else 0 : ℕ) := by
+          apply Finset.sum_congr rfl
+          intro a _
+          by_cases h : a=C.output <;> simp [h]
+        _ = R.card := by rw [← Finset.sum_filter]; simp [R,Finset.filter_ne']
+    have eB : (∑ a ∈ W, (if Branch n C a then 1 else 0 : ℕ)) = B.card := by
+      rw [← Finset.sum_filter]
+      simp [B]
+    rw [← eR,← eB,← Finset.sum_add_distrib]
     apply Finset.sum_le_sum
-    intro j _
-    split_ifs with h <;> omega
+    intro a ha
+    have hl := (mem_living.1 ha).2
+    by_cases heq : a=C.output
+    · subst a
+      simp [hoNone]
+    · by_cases hb : Branch n C a
+      · have hb' : 2 ≤ (readers n C a).card := hb
+        simpa [heq,hb] using hb'
+      · simpa [heq,hb] using Nat.succ_le_of_lt (Finset.card_pos.2 (live_readers_nonempty hl heq))
+  have hcomm :
+      (∑ a ∈ W, (readers n C a).card) =
+        ∑ j ∈ W, (W.filter fun a => LNext n C a j).card := by
+    simp_rw [readers_filter,Finset.card_eq_sum_ones,Finset.sum_filter]
+    exact Finset.sum_comm
+  have hupp : (∑ j ∈ W, (W.filter fun a => LNext n C a j).card) ≤ 2*S.card := by
+    have H : (∑ j ∈ W, (W.filter fun a => LNext n C a j).card) ≤
+        ∑ j ∈ W, (if j<n then 0 else 2 : ℕ) :=
+      Finset.sum_le_sum fun j hj => incoming_bound hC hj
+    have e : (∑ j ∈ W, (if j<n then 0 else 2 : ℕ)) = 2*S.card := by
+      simp [S,Finset.sum_ite, Nat.mul_comm]
+    exact H.trans_eq e
+  rw [hcomm] at hlow
+  change n+B.card ≤ C.gates.length+1
   omega
 
 end PEqualNP.Outside.L_meta_3376
 
-open PEqualNP.Outside.L_meta_3376 PEqualNP.CircuitLowerBounds in
+
+namespace PEqualNP.Outside.L_meta_3376
+
+theorem step614 :
+    ∀ (n t : ℕ) (G : SimpleGraph (Fin n)) (C : PEqualNP.CircuitLowerBounds.Circuit), (∀ v : Fin n, ∃ w : Fin n, G.Adj v w) → (∀ v w : Fin n, v ≠ w → ¬ G.Adj v w → 2 ≤ (G.neighborSet v).ncard → 2 ≤ (G.neighborSet w).ncard → ∃ u : Fin n, ¬ (G.Adj v u ↔ G.Adj w u)) → (∀ v w : Fin n, G.Adj v w → 2 ≤ (G.neighborSet v).ncard → 2 ≤ (G.neighborSet w).ncard → ∃ a b : Fin n, G.Adj v a ∧ a ≠ w ∧ G.Adj w b ∧ b ≠ v ∧ (a = b ∨ ¬ G.Adj a b)) → (∃ S : Finset (Fin n), (∀ u v : Fin n, G.Adj u v → 2 ≤ (G.neighborSet u).ncard → 2 ≤ (G.neighborSet v).ncard → u ∈ S ∨ v ∈ S) ∧ S.card = t) → (∀ S : Finset (Fin n), (∀ u v : Fin n, G.Adj u v → 2 ≤ (G.neighborSet u).ncard → 2 ≤ (G.neighborSet v).ncard → u ∈ S ∨ v ∈ S) → t ≤ S.card) → PEqualNP.MetaComplexity.Monotone2 C → GraphEval C G → n + t ≤ C.size + 1 := by
+  open PEqualNP.Outside.L_meta_3376 in
+  classical
+  intro n t G C hdegree htwins hadj _ ht hC he
+  by_cases hn : n=0
+  · subst n
+    have ht0 := ht ∅ (fun u => Fin.elim0 u)
+    simp at ht0
+    omega
+  have hE : GraphEval C G := he
+  let v : Fin n := ⟨0, by omega⟩
+  obtain ⟨w, hve⟩ := hdegree v
+  have ho := (edge_at_output hE hve).2
+  have ho' : C.output ∈ living n C := mem_living.2 ⟨ho, Relation.ReflTransGen.refl⟩
+  let S : Finset (Fin n) := Finset.univ.filter fun v =>
+    2 ≤ (G.neighborSet v).ncard ∧ Eligible C v
+  have hS (u : Fin n) : u ∈ S ↔ 2 ≤ (G.neighborSet u).ncard ∧ Eligible C u := by
+    simp [S]
+  have htc : t ≤ S.card := by
+    apply ht S
+    intro a b hab hda hdb
+    obtain ⟨u,v,hu,hu',hv,hv',hind⟩ := hadj a b hab hda hdb
+    rcases covers_edge hC hE hab hu hu' hv hv' hind with ha | hb
+    · exact Or.inl ((hS a).2 ⟨hda,ha⟩)
+    · exact Or.inr ((hS b).2 ⟨hdb,hb⟩)
+  let B := (living n C).filter (Branch n C)
+  let f (u : Fin n) := if h : Eligible C u then firstBranch C u h else 0
+  have hf (u : Fin n) (hu : Eligible C u) : f u = firstBranch C u hu := by simp [f,hu]
+  have hcap : S.card ≤ B.card := by
+    apply Finset.card_le_card_of_injOn f
+    · intro u hu
+      obtain ⟨_,hs⟩ := (hS u).1 hu
+      have hb := firstBranch_spec u hs
+      have hlt := (next_le hb.1).trans_lt ho
+      show f u ∈ B
+      rw [hf u hs]
+      exact Finset.mem_filter.2 ⟨mem_living.2 ⟨hlt,hb.1⟩,hb.2.2⟩
+    · intro u hu v hv huv
+      obtain ⟨hdu,hsu⟩ := (hS u).1 hu
+      obtain ⟨hdv,hsv⟩ := (hS v).1 hv
+      rw [hf u hsu,hf v hsv] at huv
+      exact branch_injective hC hE htwins hsu hsv hdu hdv huv
+  have hbudget := branch_budget hC hE hdegree ho'
+  exact (Nat.add_le_add_left (htc.trans hcap) n).trans hbudget
+
+end PEqualNP.Outside.L_meta_3376
+
+/-! ## Part 2 — the incidence graph of a projective plane and the hypotheses of `step614` -/
+
+namespace PEqualNP.Outside.L_meta_3376
+
+open PEqualNP.CircuitLowerBounds PEqualNP.MetaComplexity PEqualNP.GenericRejection
+
+section plane
+
+variable {q N : ℕ} {S : Fin N → Finset (Fin N)}
+
+/-- Two distinct points lie on at most one line. -/
+theorem same_line (hjoin : ∀ a b : Fin N, a ≠ b → ∃! l, a ∈ S l ∧ b ∈ S l)
+    {a b l l' : Fin N} (hab : a ≠ b) (ha : a ∈ S l) (hb : b ∈ S l)
+    (ha' : a ∈ S l') (hb' : b ∈ S l') : l = l' :=
+  (hjoin a b hab).unique ⟨ha, hb⟩ ⟨ha', hb'⟩
+
+/-- Some point is off any given line: a line has `q + 1 < N` points. -/
+theorem off_line (hq : 0 < q) (hN : N = q ^ 2 + q + 1) (hcard : ∀ l, (S l).card = q + 1)
+    (l : Fin N) : ∃ p, p ∉ S l := by
+  by_contra h
+  push_neg at h
+  have hle : (Finset.univ : Finset (Fin N)).card ≤ (S l).card :=
+    Finset.card_le_card (fun p _ => h p)
+  rw [Finset.card_univ, Fintype.card_fin, hcard] at hle
+  have hq2 : 0 < q ^ 2 := by positivity
+  omega
+
+/-- Every point has another point beside it. -/
+theorem other_point (hq : 0 < q) (hN : N = q ^ 2 + q + 1) (p : Fin N) : ∃ r : Fin N, r ≠ p := by
+  have hq2 : 0 < q ^ 2 := by positivity
+  have h3 : 2 ≤ N := by omega
+  by_cases hp : p.val = 0
+  · refine ⟨⟨1, by omega⟩, fun e => ?_⟩
+    rw [← e] at hp
+    simp at hp
+  · refine ⟨⟨0, by omega⟩, fun e => hp ?_⟩
+    rw [← e]
+
+/-- Every point lies on a line. -/
+theorem some_line (hq : 0 < q) (hN : N = q ^ 2 + q + 1)
+    (hjoin : ∀ a b : Fin N, a ≠ b → ∃! l, a ∈ S l ∧ b ∈ S l) (p : Fin N) : ∃ l, p ∈ S l := by
+  obtain ⟨r, hr⟩ := other_point hq hN p
+  obtain ⟨l, ⟨h1, _⟩, _⟩ := hjoin p r (Ne.symm hr)
+  exact ⟨l, h1⟩
+
+/-- A point on a line lies on a second line. -/
+theorem second_line (hq : 0 < q) (hN : N = q ^ 2 + q + 1) (hcard : ∀ l, (S l).card = q + 1)
+    (hjoin : ∀ a b : Fin N, a ≠ b → ∃! l, a ∈ S l ∧ b ∈ S l) {p l : Fin N} (hp : p ∈ S l) :
+    ∃ l', p ∈ S l' ∧ l' ≠ l := by
+  obtain ⟨r, hr⟩ := off_line hq hN hcard l
+  have hne : p ≠ r := fun e => hr (e ▸ hp)
+  obtain ⟨l', ⟨h1, h2⟩, _⟩ := hjoin p r hne
+  exact ⟨l', h1, fun e => hr (e ▸ h2)⟩
+
+/-- A line has a point other than any given one. -/
+theorem second_point (hq : 0 < q) (hcard : ∀ l, (S l).card = q + 1) (p l : Fin N) :
+    ∃ b ∈ S l, b ≠ p :=
+  Finset.exists_mem_ne (by rw [hcard]; omega) p
+
+/-- A line has two distinct points. -/
+theorem two_points (hq : 0 < q) (hcard : ∀ l, (S l).card = q + 1) (l : Fin N) :
+    ∃ a ∈ S l, ∃ b ∈ S l, a ≠ b :=
+  Finset.one_lt_card.1 (by rw [hcard]; omega)
+
+/-- Every point lies on at least `q + 1` lines: the `q ^ 2 + q` other points are spread over the
+lines through it, `q` on each. -/
+theorem point_degree (hq : 0 < q) (hN : N = q ^ 2 + q + 1) (hcard : ∀ l, (S l).card = q + 1)
+    (hjoin : ∀ a b : Fin N, a ≠ b → ∃! l, a ∈ S l ∧ b ∈ S l) (p : Fin N) :
+    q + 1 ≤ (Finset.univ.filter (fun l => p ∈ S l)).card := by
+  classical
+  set L := Finset.univ.filter (fun l => p ∈ S l) with hL
+  have hsub : (Finset.univ.erase p) ⊆ L.biUnion (fun l => (S l).erase p) := by
+    intro r hr
+    have hne : r ≠ p := Finset.ne_of_mem_erase hr
+    obtain ⟨l, ⟨h1, h2⟩, _⟩ := hjoin p r (Ne.symm hne)
+    exact Finset.mem_biUnion.2
+      ⟨l, Finset.mem_filter.2 ⟨Finset.mem_univ _, h1⟩, Finset.mem_erase.2 ⟨hne, h2⟩⟩
+  have h2 : ∀ l ∈ L, ((S l).erase p).card = q := by
+    intro l hl
+    rw [Finset.card_erase_of_mem (Finset.mem_filter.1 hl).2, hcard]
+    simp
+  have h3 : ∑ l ∈ L, ((S l).erase p).card = L.card * q := by
+    rw [Finset.sum_congr rfl h2, Finset.sum_const, smul_eq_mul]
+  have h4 : (Finset.univ.erase p).card = N - 1 := by
+    rw [Finset.card_erase_of_mem (Finset.mem_univ p), Finset.card_univ, Fintype.card_fin]
+  have h1 : N - 1 ≤ L.card * q := by
+    rw [← h3, ← h4]
+    exact (Finset.card_le_card hsub).trans Finset.card_biUnion_le
+  have e : N - 1 = q * (q + 1) := by
+    rw [hN, Nat.add_sub_cancel]
+    ring
+  rw [e, mul_comm L.card q] at h1
+  exact Nat.le_of_mul_le_mul_left h1 hq
+
+/-- **Cover bound.** A set `A` of points and a set `B` of lines that together meet every incident
+pair have at least `N` members: count the incidences of the points outside `A`. -/
+theorem cover_bound (hq : 0 < q) (hN : N = q ^ 2 + q + 1) (hcard : ∀ l, (S l).card = q + 1)
+    (hjoin : ∀ a b : Fin N, a ≠ b → ∃! l, a ∈ S l ∧ b ∈ S l) (A B : Finset (Fin N))
+    (hcov : ∀ p l, p ∈ S l → p ∈ A ∨ l ∈ B) : N ≤ A.card + B.card := by
+  classical
+  have hsum : ∑ p ∈ Aᶜ, (Finset.univ.filter (fun l => p ∈ S l)).card
+      = ∑ l, (Aᶜ.filter (fun p => p ∈ S l)).card := by
+    simp only [Finset.card_filter]
+    exact Finset.sum_comm
+  have hlow : Aᶜ.card * (q + 1) ≤ ∑ p ∈ Aᶜ, (Finset.univ.filter (fun l => p ∈ S l)).card := by
+    rw [← smul_eq_mul, ← Finset.sum_const]
+    exact Finset.sum_le_sum (fun p _ => point_degree hq hN hcard hjoin p)
+  have hhigh : ∑ l, (Aᶜ.filter (fun p => p ∈ S l)).card ≤ B.card * (q + 1) := by
+    rw [← Finset.sum_add_sum_compl B]
+    have h0 : ∑ l ∈ Bᶜ, (Aᶜ.filter (fun p => p ∈ S l)).card = 0 := by
+      apply Finset.sum_eq_zero
+      intro l hl
+      rw [Finset.card_eq_zero, Finset.filter_eq_empty_iff]
+      intro p hp hpl
+      rcases hcov p l hpl with h | h
+      · exact (Finset.mem_compl.1 hp) h
+      · exact (Finset.mem_compl.1 hl) h
+    rw [h0, add_zero, ← smul_eq_mul, ← Finset.sum_const]
+    apply Finset.sum_le_sum
+    intro l _
+    rw [← hcard l]
+    exact Finset.card_le_card (fun p hp => (Finset.mem_filter.1 hp).2)
+  rw [hsum] at hlow
+  have hmul : Aᶜ.card * (q + 1) ≤ B.card * (q + 1) := hlow.trans hhigh
+  have hle : Aᶜ.card ≤ B.card := Nat.le_of_mul_le_mul_right hmul (by omega)
+  rw [Finset.card_compl, Fintype.card_fin] at hle
+  have hA : A.card ≤ N := by simpa using Finset.card_le_univ A
+  omega
+
+end plane
+
+section graph
+
+variable {N : ℕ}
+
+/-- Point `p` (input `p`) is on line `l` (input `N + l`). -/
+def Inc (S : Fin N → Finset (Fin N)) (u v : Fin (N + N)) : Prop :=
+  ∃ p l : Fin N, u = Fin.castAdd N p ∧ v = Fin.natAdd N l ∧ p ∈ S l
+
+/-- The incidence graph on the `N + N` inputs, points first. -/
+def Gr (S : Fin N → Finset (Fin N)) : SimpleGraph (Fin (N + N)) := SimpleGraph.fromRel (Inc S)
+
+theorem cast_ne_nat (p l : Fin N) : Fin.castAdd N p ≠ Fin.natAdd N l := by
+  intro h
+  have h1 := congrArg Fin.val h
+  have h2 := p.isLt
+  simp only [Fin.coe_castAdd, Fin.coe_natAdd] at h1
+  omega
+
+theorem nat_ne_cast (p l : Fin N) : Fin.natAdd N l ≠ Fin.castAdd N p :=
+  fun h => cast_ne_nat p l h.symm
+
+theorem cast_inj {p p' : Fin N} : Fin.castAdd N p = Fin.castAdd N p' ↔ p = p' := by
+  constructor
+  · intro h
+    apply Fin.ext
+    simpa only [Fin.coe_castAdd] using congrArg Fin.val h
+  · rintro rfl
+    rfl
+
+theorem nat_inj {l l' : Fin N} : Fin.natAdd N l = Fin.natAdd N l' ↔ l = l' := by
+  constructor
+  · intro h
+    apply Fin.ext
+    have h1 := congrArg Fin.val h
+    simp only [Fin.coe_natAdd] at h1
+    omega
+  · rintro rfl
+    rfl
+
+theorem vsplit (v : Fin (N + N)) : (∃ p, v = Fin.castAdd N p) ∨ (∃ l, v = Fin.natAdd N l) :=
+  Fin.addCases (motive := fun v => (∃ p, v = Fin.castAdd N p) ∨ (∃ l, v = Fin.natAdd N l))
+    (fun p => Or.inl ⟨p, rfl⟩) (fun l => Or.inr ⟨l, rfl⟩) v
+
+variable {S : Fin N → Finset (Fin N)}
+
+theorem adj_pl {p l : Fin N} : (Gr S).Adj (Fin.castAdd N p) (Fin.natAdd N l) ↔ p ∈ S l := by
+  rw [Gr, SimpleGraph.fromRel_adj]
+  constructor
+  · rintro ⟨_, ⟨p', l', h1, h2, h3⟩ | ⟨p', l', h1, _, _⟩⟩
+    · rw [cast_inj.1 h1, nat_inj.1 h2]
+      exact h3
+    · exact absurd h1 (nat_ne_cast p' l)
+  · intro h
+    exact ⟨cast_ne_nat p l, Or.inl ⟨p, l, rfl, rfl, h⟩⟩
+
+theorem adj_lp {p l : Fin N} : (Gr S).Adj (Fin.natAdd N l) (Fin.castAdd N p) ↔ p ∈ S l := by
+  rw [SimpleGraph.adj_comm]
+  exact adj_pl
+
+theorem not_adj_pp (p p' : Fin N) : ¬ (Gr S).Adj (Fin.castAdd N p) (Fin.castAdd N p') := by
+  rw [Gr, SimpleGraph.fromRel_adj]
+  rintro ⟨_, ⟨a, b, _, h2, _⟩ | ⟨a, b, _, h2, _⟩⟩
+  · exact cast_ne_nat _ _ h2
+  · exact cast_ne_nat _ _ h2
+
+theorem not_adj_ll (l l' : Fin N) : ¬ (Gr S).Adj (Fin.natAdd N l) (Fin.natAdd N l') := by
+  rw [Gr, SimpleGraph.fromRel_adj]
+  rintro ⟨_, ⟨a, b, h1, _, _⟩ | ⟨a, b, h1, _, _⟩⟩
+  · exact nat_ne_cast _ _ h1
+  · exact nat_ne_cast _ _ h1
+
+end graph
+
+section facts
+
+variable {q N : ℕ} {S : Fin N → Finset (Fin N)}
+  (hq : 0 < q) (hN : N = q ^ 2 + q + 1) (hcard : ∀ l, (S l).card = q + 1)
+  (hjoin : ∀ a b : Fin N, a ≠ b → ∃! l, a ∈ S l ∧ b ∈ S l)
+include hq hN hcard hjoin
+
+theorem has_nbr (v : Fin (N + N)) : ∃ w, (Gr S).Adj v w := by
+  rcases vsplit v with ⟨p, rfl⟩ | ⟨l, rfl⟩
+  · obtain ⟨l, hl⟩ := some_line hq hN hjoin p
+    exact ⟨_, adj_pl.2 hl⟩
+  · obtain ⟨a, ha, _⟩ := two_points hq hcard l
+    exact ⟨_, adj_lp.2 ha⟩
+
+theorem deg_two (v : Fin (N + N)) : 2 ≤ ((Gr S).neighborSet v).ncard := by
+  rcases vsplit v with ⟨p, rfl⟩ | ⟨l, rfl⟩
+  · obtain ⟨l, hl⟩ := some_line hq hN hjoin p
+    obtain ⟨l', hl', hne⟩ := second_line hq hN hcard hjoin hl
+    have hsub : ({Fin.natAdd N l, Fin.natAdd N l'} : Set (Fin (N + N))) ⊆
+        (Gr S).neighborSet (Fin.castAdd N p) := by
+      intro x hx
+      simp only [Set.mem_insert_iff, Set.mem_singleton_iff] at hx
+      rcases hx with rfl | rfl
+      · exact adj_pl.2 hl
+      · exact adj_pl.2 hl'
+    have hne' : Fin.natAdd N l ≠ Fin.natAdd N l' := fun e => hne (nat_inj.1 e).symm
+    calc 2 = ({Fin.natAdd N l, Fin.natAdd N l'} : Set (Fin (N + N))).ncard :=
+          (Set.ncard_pair hne').symm
+      _ ≤ _ := Set.ncard_le_ncard hsub
+  · obtain ⟨a, ha, b, hb, hab⟩ := two_points hq hcard l
+    have hsub : ({Fin.castAdd N a, Fin.castAdd N b} : Set (Fin (N + N))) ⊆
+        (Gr S).neighborSet (Fin.natAdd N l) := by
+      intro x hx
+      simp only [Set.mem_insert_iff, Set.mem_singleton_iff] at hx
+      rcases hx with rfl | rfl
+      · exact adj_lp.2 ha
+      · exact adj_lp.2 hb
+    have hne' : Fin.castAdd N a ≠ Fin.castAdd N b := fun e => hab (cast_inj.1 e)
+    calc 2 = ({Fin.castAdd N a, Fin.castAdd N b} : Set (Fin (N + N))).ncard :=
+          (Set.ncard_pair hne').symm
+      _ ≤ _ := Set.ncard_le_ncard hsub
+
+/-- Non-adjacent distinct vertices have different neighbourhoods. -/
+theorem twins (v w : Fin (N + N)) (hvw : v ≠ w) (hn : ¬ (Gr S).Adj v w) :
+    ∃ u, ¬ ((Gr S).Adj v u ↔ (Gr S).Adj w u) := by
+  rcases vsplit v with ⟨p, rfl⟩ | ⟨l, rfl⟩ <;> rcases vsplit w with ⟨p', rfl⟩ | ⟨l', rfl⟩
+  · -- two points: a second line through `p` misses `p'`
+    have hpp : p ≠ p' := fun e => hvw (by rw [e])
+    obtain ⟨l1, ⟨h1, h2⟩, _⟩ := hjoin p p' hpp
+    obtain ⟨l, hl, hne⟩ := second_line hq hN hcard hjoin h1
+    refine ⟨Fin.natAdd N l, fun hiff => ?_⟩
+    have hp' : p' ∈ S l := adj_pl.1 (hiff.1 (adj_pl.2 hl))
+    exact hne (same_line hjoin hpp hl hp' h1 h2)
+  · -- a point off a line: a point of the line
+    obtain ⟨a, ha, _⟩ := two_points hq hcard l'
+    exact ⟨Fin.castAdd N a, fun hiff => not_adj_pp p a (hiff.2 (adj_lp.2 ha))⟩
+  · obtain ⟨a, ha, _⟩ := two_points hq hcard l
+    exact ⟨Fin.castAdd N a, fun hiff => not_adj_pp p' a (hiff.1 (adj_lp.2 ha))⟩
+  · -- two lines: a point of `l` off `l'`
+    have hll : l ≠ l' := fun e => hvw (by rw [e])
+    obtain ⟨a, ha, b, hb, hab⟩ := two_points hq hcard l
+    by_cases ha' : a ∈ S l'
+    · by_cases hb' : b ∈ S l'
+      · exact absurd (same_line hjoin hab ha hb ha' hb') hll
+      · refine ⟨Fin.castAdd N b, fun hiff => hb' ?_⟩
+        exact adj_lp.1 (hiff.1 (adj_lp.2 hb))
+    · refine ⟨Fin.castAdd N a, fun hiff => ha' ?_⟩
+      exact adj_lp.1 (hiff.1 (adj_lp.2 ha))
+
+/-- Every incident pair carries a two-vertex certificate: a second line through the point and a
+second point on the line, which are not incident. -/
+theorem certificate (v w : Fin (N + N)) (hvw : (Gr S).Adj v w) :
+    ∃ a b, (Gr S).Adj v a ∧ a ≠ w ∧ (Gr S).Adj w b ∧ b ≠ v ∧ (a = b ∨ ¬ (Gr S).Adj a b) := by
+  rcases vsplit v with ⟨p, rfl⟩ | ⟨l, rfl⟩ <;> rcases vsplit w with ⟨p', rfl⟩ | ⟨l', rfl⟩
+  · exact absurd hvw (not_adj_pp p p')
+  · have hp := adj_pl.1 hvw
+    obtain ⟨l2, hl2, hne⟩ := second_line hq hN hcard hjoin hp
+    obtain ⟨b, hb, hbp⟩ := second_point hq hcard p l'
+    refine ⟨Fin.natAdd N l2, Fin.castAdd N b, adj_pl.2 hl2, fun e => hne (nat_inj.1 e),
+      adj_lp.2 hb, fun e => hbp (cast_inj.1 e), Or.inr fun hab => ?_⟩
+    exact hne (same_line hjoin (Ne.symm hbp) hl2 (adj_lp.1 hab) hp hb)
+  · have hp := adj_lp.1 hvw
+    obtain ⟨l2, hl2, hne⟩ := second_line hq hN hcard hjoin hp
+    obtain ⟨b, hb, hbp⟩ := second_point hq hcard p' l
+    refine ⟨Fin.castAdd N b, Fin.natAdd N l2, adj_lp.2 hb, fun e => hbp (cast_inj.1 e),
+      adj_pl.2 hl2, fun e => hne (nat_inj.1 e), Or.inr fun hab => ?_⟩
+    exact hne (same_line hjoin (Ne.symm hbp) hl2 (adj_pl.1 hab) hp hb)
+  · exact absurd hvw (not_adj_ll l l')
+
+/-- The points form a cover of size `N`. -/
+theorem point_cover : ∃ T : Finset (Fin (N + N)), (∀ u v, (Gr S).Adj u v →
+    2 ≤ ((Gr S).neighborSet u).ncard → 2 ≤ ((Gr S).neighborSet v).ncard → u ∈ T ∨ v ∈ T) ∧
+    T.card = N := by
+  classical
+  refine ⟨Finset.univ.image (Fin.castAdd N), ?_, ?_⟩
+  · intro u v huv _ _
+    rcases vsplit u with ⟨p, rfl⟩ | ⟨l, rfl⟩
+    · exact Or.inl (Finset.mem_image.2 ⟨p, Finset.mem_univ _, rfl⟩)
+    · rcases vsplit v with ⟨p, rfl⟩ | ⟨l', rfl⟩
+      · exact Or.inr (Finset.mem_image.2 ⟨p, Finset.mem_univ _, rfl⟩)
+      · exact absurd huv (not_adj_ll l l')
+  · rw [Finset.card_image_of_injective _ (fun a b h => cast_inj.1 h), Finset.card_univ,
+      Fintype.card_fin]
+
+/-- Every cover has at least `N` vertices. -/
+theorem cover_lower (T : Finset (Fin (N + N))) (hT : ∀ u v, (Gr S).Adj u v →
+    2 ≤ ((Gr S).neighborSet u).ncard → 2 ≤ ((Gr S).neighborSet v).ncard → u ∈ T ∨ v ∈ T) :
+    N ≤ T.card := by
+  classical
+  let A := Finset.univ.filter (fun p : Fin N => Fin.castAdd N p ∈ T)
+  let B := Finset.univ.filter (fun l : Fin N => Fin.natAdd N l ∈ T)
+  have hcov : ∀ p l, p ∈ S l → p ∈ A ∨ l ∈ B := by
+    intro p l hpl
+    rcases hT _ _ (adj_pl.2 hpl) (deg_two hq hN hcard hjoin _) (deg_two hq hN hcard hjoin _)
+      with h | h
+    · exact Or.inl (Finset.mem_filter.2 ⟨Finset.mem_univ _, h⟩)
+    · exact Or.inr (Finset.mem_filter.2 ⟨Finset.mem_univ _, h⟩)
+  have hAB := cover_bound hq hN hcard hjoin A B hcov
+  have hA : A.card ≤ (T.filter (fun v : Fin (N + N) => v.val < N)).card := by
+    apply Finset.card_le_card_of_injOn (fun p => Fin.castAdd N p)
+    · intro p hp
+      have hp' := (Finset.mem_filter.1 hp).2
+      exact Finset.mem_filter.2 ⟨hp', by simp⟩
+    · intro a _ b _ h
+      exact cast_inj.1 h
+  have hB : B.card ≤ (T.filter (fun v : Fin (N + N) => ¬ v.val < N)).card := by
+    apply Finset.card_le_card_of_injOn (fun l => Fin.natAdd N l)
+    · intro l hl
+      have hl' := (Finset.mem_filter.1 hl).2
+      exact Finset.mem_filter.2 ⟨hl', by simp⟩
+    · intro a _ b _ h
+      exact nat_inj.1 h
+  have hsplit := Finset.card_filter_add_card_filter_not
+    (s := T) (fun v : Fin (N + N) => v.val < N)
+  omega
+
+end facts
+
+section slice
+
+variable {N : ℕ} {S : Fin N → Finset (Fin N)} {C : Circuit}
+
+/-- The points of an input set. -/
+def Xs (T : Finset (Fin (N + N))) : Finset (Fin N) :=
+  Finset.univ.filter (fun p => Fin.castAdd N p ∈ T)
+
+/-- The lines of an input set. -/
+def Ys (T : Finset (Fin (N + N))) : Finset (Fin N) :=
+  Finset.univ.filter (fun l => Fin.natAdd N l ∈ T)
+
+theorem input_eq (T : Finset (Fin (N + N))) :
+    List.ofFn (point T) = incidenceInput (Xs T) (Ys T) := by
+  rw [List.ofFn_add]
+  simp [incidenceInput, point, Xs, Ys]
+  -- simp leaves `Fin.castLE _ i` where the statement has `Fin.castAdd N i`: equal by definition
+  try rfl
+
+theorem val_eq (T : Finset (Fin (N + N))) :
+    val C (point T) C.output = C.eval (incidenceInput (Xs T) (Ys T)) := by
+  rw [← input_eq]
+  rfl
+
+theorem xs_ys_card (T : Finset (Fin (N + N))) : (Xs T).card + (Ys T).card ≤ T.card := by
+  classical
+  have hA : (Xs T).card ≤ (T.filter (fun v : Fin (N + N) => v.val < N)).card := by
+    apply Finset.card_le_card_of_injOn (fun p => Fin.castAdd N p)
+    · intro p hp
+      have hp' := (Finset.mem_filter.1 hp).2
+      exact Finset.mem_filter.2 ⟨hp', by simp⟩
+    · intro a _ b _ h
+      exact cast_inj.1 h
+  have hB : (Ys T).card ≤ (T.filter (fun v : Fin (N + N) => ¬ v.val < N)).card := by
+    apply Finset.card_le_card_of_injOn (fun l => Fin.natAdd N l)
+    · intro l hl
+      have hl' := (Finset.mem_filter.1 hl).2
+      exact Finset.mem_filter.2 ⟨hl', by simp⟩
+    · intro a _ b _ h
+      exact nat_inj.1 h
+  have hsplit := Finset.card_filter_add_card_filter_not
+    (s := T) (fun v : Fin (N + N) => v.val < N)
+  omega
+
+theorem xs_pair (p l : Fin N) : Xs {Fin.castAdd N p, Fin.natAdd N l} = {p} := by
+  ext r
+  rw [Xs, Finset.mem_filter, Finset.mem_insert, Finset.mem_singleton, Finset.mem_singleton]
+  constructor
+  · rintro ⟨-, h | h⟩
+    · exact cast_inj.1 h
+    · exact absurd h (cast_ne_nat r l)
+  · intro h
+    exact ⟨Finset.mem_univ _, Or.inl (by rw [h])⟩
+
+theorem ys_pair (p l : Fin N) : Ys {Fin.castAdd N p, Fin.natAdd N l} = {l} := by
+  ext r
+  rw [Ys, Finset.mem_filter, Finset.mem_insert, Finset.mem_singleton, Finset.mem_singleton]
+  constructor
+  · rintro ⟨-, h | h⟩
+    · exact absurd h (nat_ne_cast p r)
+    · exact nat_inj.1 h
+  · intro h
+    exact ⟨Finset.mem_univ _, Or.inr (by rw [h])⟩
+
+/-- **The slice.** Right on the incident pairs and false on every false input of at most three
+elements, a monotone circuit is right on every input set of at most three elements. -/
+theorem slice_eval (hC : Monotone2 C) (hright : RightOnIncidentPairs S C)
+    (hfalse : ∀ X Y : Finset (Fin N), X.card + Y.card ≤ 3 → IsFalseInput S X Y →
+      C.eval (incidenceInput X Y) = false) : GraphEval C (Gr S) := by
+  classical
+  intro T hT
+  constructor
+  · intro h
+    by_contra hno
+    push_neg at hno
+    have hF : IsFalseInput S (Xs T) (Ys T) := by
+      intro l hl
+      rw [Finset.disjoint_left]
+      intro p hpS hpX
+      exact hno (Fin.castAdd N p) (Finset.mem_filter.1 hpX).2 (Fin.natAdd N l)
+        (Finset.mem_filter.1 hl).2 (adj_pl.2 hpS)
+    rw [val_eq, hfalse _ _ ((xs_ys_card T).trans hT) hF] at h
+    exact Bool.false_ne_true h
+  · rintro ⟨u, hu, v, hv, huv⟩
+    have key : ∀ p l, p ∈ S l → Fin.castAdd N p ∈ T → Fin.natAdd N l ∈ T →
+        val C (point T) C.output = true := by
+      intro p l hpl hp hl
+      have h1 : val C (point {Fin.castAdd N p, Fin.natAdd N l}) C.output = true := by
+        rw [val_eq, xs_pair, ys_pair]
+        exact hright l p hpl
+      refine acts_mono hC (point_mono ?_) _ h1
+      intro x hx
+      simp only [Finset.mem_insert, Finset.mem_singleton] at hx
+      rcases hx with rfl | rfl
+      · exact hp
+      · exact hl
+    rcases vsplit u with ⟨p, rfl⟩ | ⟨l, rfl⟩ <;> rcases vsplit v with ⟨p', rfl⟩ | ⟨l', rfl⟩
+    · exact absurd huv (not_adj_pp p p')
+    · exact key p l' (adj_pl.1 huv) hu hv
+    · exact key p' l (adj_lp.1 huv) hv hu
+    · exact absurd huv (not_adj_ll l l')
+
+end slice
+
+end PEqualNP.Outside.L_meta_3376
+
+/-! ## Part 3 — the recorded statement -/
+
+open PEqualNP.Outside.L_meta_3376 in
 theorem PEqualNP.Outside.L_meta_3376 : ∀ (x1 x2 : ℕ) (x3 : Fin x2 → Finset (Fin x2)) (x4 : PEqualNP.CircuitLowerBounds.Circuit), (0 : ℕ) < x1 → x2 = x1 ^ (2 : ℕ) + x1 + (1 : ℕ) → (∀ (x7 : Fin x2), (x3 x7).card = x1 + (1 : ℕ)) → (∀ (x8 x9 : Fin x2), x8 ≠ x9 → ∃! x11 : Fin x2, x8 ∈ x3 x11 ∧ x9 ∈ x3 x11) → PEqualNP.TopForm.IsAO2 (x2 + x2) x4 → x4.output < x2 + x2 + x4.size → PEqualNP.GenericRejection.RightOnIncidentPairs x3 x4 → (∀ (x12 x13 : Finset (Fin x2)), x12.card + x13.card ≤ (3 : ℕ) → PEqualNP.GenericRejection.IsFalseInput x3 x12 x13 → x4.eval (PEqualNP.GenericRejection.incidenceInput x12 x13) = Bool.false) → x2 + x2 + x2 ≤ x4.size + (1 : ℕ) := by
-  intro q N S C hq hN deg join hC hout hacc hrej
-  have h1 := output_is_gate N S C hrej
-  have hN3 : 2 ≤ N := by subst hN; nlinarith
-  have hpt : ∀ p : Fin N, ∃ l, p ∈ S l := by
-    intro p
-    obtain ⟨r, _, hr⟩ := Finset.exists_mem_ne (s := (Finset.univ : Finset (Fin N)))
-      (by rw [Finset.card_univ, Fintype.card_fin]; omega) p
-    obtain ⟨l, ⟨hl, _⟩, _⟩ := join p r (Ne.symm hr)
-    exact ⟨l, hl⟩
-  have hln : ∀ l : Fin N, ∃ p, p ∈ S l := by
-    intro l
-    have : 0 < (S l).card := by rw [deg]; omega
-    obtain ⟨p, hp⟩ := Finset.card_pos.mp this
-    exact ⟨p, hp⟩
-  have hread := input_read N S C hC h1 hout hacc hrej hpt hln
-  have hcore := core q N S C hq hN deg join hC h1 hout hacc hrej
-  exact glue N C hC h1 hout hread hcore
+  intro q N S C hq hN hcard hjoin hAO _hout hright hfalse
+  have hC : PEqualNP.MetaComplexity.Monotone2 C := by
+    unfold PEqualNP.TopForm.IsAO2 at hAO
+    obtain ⟨hao, _, hlen⟩ := hAO
+    intro g hg
+    refine ⟨?_, (hlen g hg).le⟩
+    rcases hao g hg with h | h <;> simp [h]
+  have key := step614 (N + N) N (Gr S) C (has_nbr hq hN hcard hjoin)
+    (fun v w hvw hn _ _ => twins hq hN hcard hjoin v w hvw hn)
+    (fun v w hvw _ _ => certificate hq hN hcard hjoin v w hvw)
+    (point_cover hq hN hcard hjoin) (cover_lower hq hN hcard hjoin) hC
+    (slice_eval hC hright hfalse)
+  exact key
